@@ -1,0 +1,196 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Persistent DynamoDB tables for active food-delivery orders and live courier state.
+  Deploy this template through the same CloudFormation stack on every run.
+
+Resources:
+  ActiveOrdersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: active_orders
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+        - AttributeName: customerId
+          AttributeType: S
+        - AttributeName: restaurantId
+          AttributeType: S
+        - AttributeName: courierId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+        - AttributeName: updatedAt
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_customer_orders
+          KeySchema:
+            - AttributeName: customerId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - restaurantId
+              - courierId
+              - status
+              - items
+              - pricing
+              - updatedAt
+              - expiresAt
+
+        - IndexName: GSI_restaurant_orders
+          KeySchema:
+            - AttributeName: restaurantId
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - customerId
+              - courierId
+              - items
+              - pricing
+              - createdAt
+              - updatedAt
+              - expiresAt
+
+        - IndexName: GSI_courier_orders
+          KeySchema:
+            - AttributeName: courierId
+              KeyType: HASH
+            - AttributeName: updatedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - customerId
+              - restaurantId
+              - status
+              - items
+              - deliveryAddress
+              - pricing
+              - createdAt
+              - expiresAt
+
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+      SSESpecification:
+        SSEEnabled: true
+
+      Tags:
+        - Key: Project
+          Value: food-delivery
+        - Key: DataType
+          Value: active-order-state
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # DynamoDB can limit how many indexed tables are being created at once.
+  # Creating this table after active_orders avoids parallel GSI creation issues.
+  CourierStatesTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: ActiveOrdersTable
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: courier_states
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: true
+
+      AttributeDefinitions:
+        - AttributeName: courierId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: updatedAt
+          AttributeType: S
+        - AttributeName: currentOrderId
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: courierId
+          KeyType: HASH
+
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_couriers_by_status
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: updatedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - currentOrderId
+              - vehicleType
+              - lastLocation
+
+        - IndexName: GSI_courier_by_current_order
+          KeySchema:
+            - AttributeName: currentOrderId
+              KeyType: HASH
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - status
+              - vehicleType
+              - lastLocation
+              - updatedAt
+
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+      SSESpecification:
+        SSEEnabled: true
+
+      Tags:
+        - Key: Project
+          Value: food-delivery
+        - Key: DataType
+          Value: courier-live-state
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  ActiveOrdersTableName:
+    Description: Name of the active orders table
+    Value: !Ref ActiveOrdersTable
+    Export:
+      Name: food-delivery-active-orders-table-name
+
+  ActiveOrdersTableArn:
+    Description: ARN of the active orders table
+    Value: !GetAtt ActiveOrdersTable.Arn
+    Export:
+      Name: food-delivery-active-orders-table-arn
+
+  CourierStatesTableName:
+    Description: Name of the courier states table
+    Value: !Ref CourierStatesTable
+    Export:
+      Name: food-delivery-courier-states-table-name
+
+  CourierStatesTableArn:
+    Description: ARN of the courier states table
+    Value: !GetAtt CourierStatesTable.Arn
+    Export:
+      Name: food-delivery-courier-states-table-arn
