@@ -2,6 +2,7 @@ name: Deploy DynamoDB tables
 
 on:
   workflow_dispatch:
+
   push:
     branches:
       - main
@@ -9,8 +10,10 @@ on:
       - "infrastructure/dynamodb-tables.yml"
       - ".github/workflows/deploy-dynamodb.yml"
 
+# Нужны для GitHub OIDC.
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: deploy-dynamodb-production
@@ -30,20 +33,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7.0.0
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials through OIDC
         uses: aws-actions/configure-aws-credentials@v6.2.2
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: dynamodb-deploy-${{ github.run_id }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          mask-aws-account-id: true
 
       - name: Validate CloudFormation template
         run: |
           aws cloudformation validate-template \
-            --template-body "file://${TEMPLATE_FILE}"
+            --template-body "file://${TEMPLATE_FILE}" \
+            --region "${AWS_REGION}"
 
       - name: Deploy DynamoDB stack
         run: |
