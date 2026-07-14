@@ -1,0 +1,250 @@
+name: Deploy preview Fargate platform
+
+on:
+  workflow_dispatch:
+    inputs:
+      lifetime_minutes:
+        description: How long the temporary platform should live
+        required: true
+        default: "60"
+        type: string
+
+      allowed_cidr:
+        description: CIDR allowed to call the ALB; empty uses PREVIEW_ALLOWED_CIDR or 0.0.0.0/0
+        required: false
+        default: ""
+        type: string
+
+      container_port:
+        description: Port expected from order-service
+        required: true
+        default: "8080"
+        type: string
+
+      health_check_path:
+        description: ALB health-check path for order-service
+        required: true
+        default: "/health"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: food-delivery-preview-platform
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  PLATFORM_STACK_NAME: food-delivery-preview-platform
+  ORDER_RUNTIME_STACK_NAME: order-service-runtime
+  TEMPLATE_FILE: infrastructure/preview-platform.yml
+
+jobs:
+  deploy-and-clean:
+    name: Deploy platform and delete it later
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@v6.2.2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: preview-platform-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Validate inputs and resolve network
+        id: config
+        env:
+          INPUT_LIFETIME: ${{ inputs.lifetime_minutes }}
+          INPUT_ALLOWED_CIDR: ${{ inputs.allowed_cidr }}
+          REPOSITORY_ALLOWED_CIDR: ${{ vars.PREVIEW_ALLOWED_CIDR }}
+          VPC_ID: ${{ vars.ECS_VPC_ID }}
+          PUBLIC_SUBNET_IDS: ${{ vars.ECS_PUBLIC_SUBNET_IDS }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$INPUT_LIFETIME" =~ ^[0-9]+$ ]]; then
+            echo "::error::lifetime_minutes must be a positive integer"
+            exit 1
+          fi
+
+          if (( INPUT_LIFETIME < 1 || INPUT_LIFETIME > 90 )); then
+            echo "::error::lifetime_minutes must be between 1 and 90"
+            exit 1
+          fi
+
+          if [[ -z "$VPC_ID" ]]; then
+            echo "::error::Repository variable ECS_VPC_ID is required"
+            exit 1
+          fi
+
+          if [[ -z "$PUBLIC_SUBNET_IDS" ]]; then
+            echo "::error::Repository variable ECS_PUBLIC_SUBNET_IDS is required"
+            exit 1
+          fi
+
+          SUBNET_COUNT=$(awk -F',' '{print NF}' <<< "$PUBLIC_SUBNET_IDS")
+          if (( SUBNET_COUNT < 2 )); then
+            echo "::error::ECS_PUBLIC_SUBNET_IDS must contain at least two subnet IDs"
+            exit 1
+          fi
+
+          ALLOWED_CIDR="$INPUT_ALLOWED_CIDR"
+          if [[ -z "$ALLOWED_CIDR" ]]; then
+            ALLOWED_CIDR="$REPOSITORY_ALLOWED_CIDR"
+          fi
+          if [[ -z "$ALLOWED_CIDR" ]]; then
+            ALLOWED_CIDR="0.0.0.0/0"
+          fi
+
+          aws ec2 describe-vpcs \
+            --vpc-ids "$VPC_ID" \
+            --region "$AWS_REGION" \
+            >/dev/null
+
+          IFS=',' read -ra SUBNETS <<< "$PUBLIC_SUBNET_IDS"
+          AVAILABILITY_ZONES=()
+
+          for subnet in "${SUBNETS[@]}"; do
+            subnet="$(xargs <<< "$subnet")"
+
+            SUBNET_DATA=$(aws ec2 describe-subnets \
+              --subnet-ids "$subnet" \
+              --region "$AWS_REGION" \
+              --query "Subnets[0].[VpcId,AvailabilityZone]" \
+              --output text)
+
+            SUBNET_VPC=$(awk '{print $1}' <<< "$SUBNET_DATA")
+            SUBNET_AZ=$(awk '{print $2}' <<< "$SUBNET_DATA")
+
+            if [[ "$SUBNET_VPC" != "$VPC_ID" ]]; then
+              echo "::error::Subnet $subnet belongs to $SUBNET_VPC, not $VPC_ID"
+              exit 1
+            fi
+
+            AVAILABILITY_ZONES+=("$SUBNET_AZ")
+          done
+
+          UNIQUE_AZ_COUNT=$(printf '%s\n' "${AVAILABILITY_ZONES[@]}" | sort -u | wc -l)
+          if (( UNIQUE_AZ_COUNT < 2 )); then
+            echo "::error::The ALB requires subnets in at least two Availability Zones"
+            exit 1
+          fi
+
+          echo "vpc-id=$VPC_ID" >> "$GITHUB_OUTPUT"
+          echo "subnet-ids=$PUBLIC_SUBNET_IDS" >> "$GITHUB_OUTPUT"
+          echo "allowed-cidr=$ALLOWED_CIDR" >> "$GITHUB_OUTPUT"
+          echo "lifetime-minutes=$INPUT_LIFETIME" >> "$GITHUB_OUTPUT"
+
+      - name: Validate CloudFormation template
+        run: |
+          set -euo pipefail
+          aws cloudformation validate-template \
+            --template-body "file://${TEMPLATE_FILE}" \
+            --region "$AWS_REGION"
+
+      - name: Deploy temporary platform
+        id: deploy
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          aws cloudformation deploy \
+            --stack-name "$PLATFORM_STACK_NAME" \
+            --template-file "$TEMPLATE_FILE" \
+            --region "$AWS_REGION" \
+            --no-fail-on-empty-changeset \
+            --tags \
+              Project=food-delivery \
+              Environment=preview \
+              ManagedBy=GitHubActions \
+              GitHubRunId="${GITHUB_RUN_ID}" \
+            --parameter-overrides \
+              VpcId="${{ steps.config.outputs.vpc-id }}" \
+              PublicSubnetIds="${{ steps.config.outputs.subnet-ids }}" \
+              AllowedCidr="${{ steps.config.outputs.allowed-cidr }}" \
+              OrderServiceContainerPort="${{ inputs.container_port }}" \
+              OrderServiceHealthCheckPath="${{ inputs.health_check_path }}"
+
+      - name: Show platform outputs
+        if: steps.deploy.outcome == 'success'
+        run: |
+          set -euo pipefail
+
+          aws cloudformation describe-stacks \
+            --stack-name "$PLATFORM_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}" \
+            --output table
+
+          PUBLIC_URL=$(aws cloudformation describe-stacks \
+            --stack-name "$PLATFORM_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='PublicUrl'].OutputValue" \
+            --output text)
+
+          {
+            echo "## Temporary preview platform"
+            echo
+            echo "- URL: ${PUBLIC_URL}"
+            echo "- Lifetime: ${{ steps.config.outputs.lifetime-minutes }} minutes"
+            echo "- The order-service repository must now deploy the order-service-runtime stack."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep platform for requested lifetime
+        if: steps.deploy.outcome == 'success'
+        run: |
+          set -euo pipefail
+
+          SECONDS_TO_WAIT=$(( ${{ steps.config.outputs.lifetime-minutes }} * 60 ))
+          echo "The platform will be deleted after ${SECONDS_TO_WAIT} seconds."
+          sleep "$SECONDS_TO_WAIT"
+
+      - name: Delete runtime and platform stacks
+        if: always()
+        run: |
+          set -euo pipefail
+
+          stack_exists() {
+            aws cloudformation describe-stacks \
+              --stack-name "$1" \
+              --region "$AWS_REGION" \
+              >/dev/null 2>&1
+          }
+
+          delete_stack() {
+            local stack_name="$1"
+
+            if ! stack_exists "$stack_name"; then
+              echo "Stack $stack_name does not exist; nothing to delete."
+              return 0
+            fi
+
+            echo "Deleting stack $stack_name..."
+            aws cloudformation delete-stack \
+              --stack-name "$stack_name" \
+              --region "$AWS_REGION"
+
+            aws cloudformation wait stack-delete-complete \
+              --stack-name "$stack_name" \
+              --region "$AWS_REGION"
+
+            echo "Deleted stack $stack_name."
+          }
+
+          # The ECS service must be removed before its cluster and target group.
+          delete_stack "$ORDER_RUNTIME_STACK_NAME"
+          delete_stack "$PLATFORM_STACK_NAME"
+
+      - name: Fail workflow when deployment failed
+        if: steps.deploy.outcome != 'success'
+        run: |
+          echo "::error::The platform deployment failed. Any created stacks were cleaned up."
+          exit 1

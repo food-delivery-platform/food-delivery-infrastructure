@@ -1,0 +1,193 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Temporary shared preview platform for food-delivery microservices.
+  Creates an ECS Fargate cluster, an internet-facing ALB, one target group
+  for order-service, and security groups. It intentionally does not create
+  an ECS task definition or ECS service.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC where the temporary platform will be created.
+
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >-
+      At least two public subnets in different Availability Zones.
+      These subnets must belong to VpcId and have a route to an Internet Gateway.
+
+  AllowedCidr:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: CIDR allowed to call the public ALB on port 80.
+
+  OrderServiceContainerPort:
+    Type: Number
+    Default: 8080
+    MinValue: 1
+    MaxValue: 65535
+    Description: Port exposed by the future order-service container.
+
+  OrderServiceHealthCheckPath:
+    Type: String
+    Default: "/health"
+    Description: HTTP health-check path used by the order-service target group.
+
+Resources:
+  PreviewCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: food-delivery-preview-cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled
+      Tags:
+        - Key: Project
+          Value: food-delivery
+        - Key: Environment
+          Value: preview
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public HTTP access to the temporary preview ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: Public preview HTTP
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedCidr
+      SecurityGroupEgress:
+        - Description: ALB traffic to Fargate tasks
+          IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: food-delivery-preview-alb-sg
+        - Key: Project
+          Value: food-delivery
+        - Key: Environment
+          Value: preview
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow the preview ALB to reach Fargate tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: ALB to order-service container
+          IpProtocol: tcp
+          FromPort: !Ref OrderServiceContainerPort
+          ToPort: !Ref OrderServiceContainerPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - Description: Outbound traffic for application dependencies and AWS APIs
+          IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: food-delivery-preview-task-sg
+        - Key: Project
+          Value: food-delivery
+        - Key: Environment
+          Value: preview
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  PreviewLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: food-delivery-preview-alb
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets: !Ref PublicSubnetIds
+      Tags:
+        - Key: Project
+          Value: food-delivery
+        - Key: Environment
+          Value: preview
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  OrderServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: food-delivery-order-preview
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: !Ref OrderServiceContainerPort
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      HealthCheckPath: !Ref OrderServiceHealthCheckPath
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200-399"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "15"
+      Tags:
+        - Key: Project
+          Value: food-delivery
+        - Key: Service
+          Value: order-service
+        - Key: Environment
+          Value: preview
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref PreviewLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref OrderServiceTargetGroup
+
+Outputs:
+  ClusterName:
+    Description: ECS cluster name used by service runtime stacks
+    Value: !Ref PreviewCluster
+
+  ClusterArn:
+    Description: ECS cluster ARN
+    Value: !GetAtt PreviewCluster.Arn
+
+  TargetGroupArn:
+    Description: Target group ARN for order-service
+    Value: !Ref OrderServiceTargetGroup
+
+  TaskSecurityGroupId:
+    Description: Security group that must be assigned to Fargate tasks
+    Value: !Ref TaskSecurityGroup
+
+  SubnetIds:
+    Description: Comma-separated public subnet IDs for the ECS service
+    Value: !Join [",", !Ref PublicSubnetIds]
+
+  ContainerPort:
+    Description: Port expected from the order-service task definition
+    Value: !Ref OrderServiceContainerPort
+
+  LoadBalancerDnsName:
+    Description: Public DNS name of the temporary ALB
+    Value: !GetAtt PreviewLoadBalancer.DNSName
+
+  PublicUrl:
+    Description: Public HTTP URL of the temporary environment
+    Value: !Sub "http://${PreviewLoadBalancer.DNSName}"
