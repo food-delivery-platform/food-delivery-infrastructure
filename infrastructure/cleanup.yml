@@ -117,7 +117,7 @@ Resources:
                   - cloudformation:DescribeStacks
                   - cloudformation:DeleteStack
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/order-service-runtime/*"
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/delivery-service-runtime/*"
                   - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/restaurant-service-runtime/*"
                   - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/food-delivery-preview-platform/*"
 
@@ -155,7 +155,7 @@ Resources:
           cloudformation_role_arn = os.environ["CLOUDFORMATION_ROLE_ARN"]
 
           allowed_stacks = {
-              "order-service-runtime",
+              "delivery-service-runtime",
               "restaurant-service-runtime",
               "food-delivery-preview-platform",
           }
@@ -259,65 +259,65 @@ Resources:
           - |
             {
               "Comment": "Delete service runtime stacks and then the temporary shared platform",
-              "StartAt": "DeleteOrderRuntime",
+              "StartAt": "DeleteDeliveryRuntime",
               "States": {
-                "DeleteOrderRuntime": {
+                "DeleteDeliveryRuntime": {
                   "Type": "Task",
                   "Resource": "arn:${Partition}:states:::lambda:invoke",
                   "Parameters": {
                     "FunctionName": "${CleanupFunctionArn}",
                     "Payload": {
                       "action": "delete",
-                      "stackName": "order-service-runtime"
+                      "stackName": "delivery-service-runtime"
                     }
                   },
                   "ResultSelector": {
                     "status.$": "$.Payload.status"
                   },
-                  "ResultPath": "$.order",
-                  "Next": "WaitOrderRuntime"
+                  "ResultPath": "$.delivery",
+                  "Next": "WaitDeliveryRuntime"
                 },
-                "WaitOrderRuntime": {
+                "WaitDeliveryRuntime": {
                   "Type": "Wait",
                   "Seconds": 20,
-                  "Next": "CheckOrderRuntime"
+                  "Next": "CheckDeliveryRuntime"
                 },
-                "CheckOrderRuntime": {
+                "CheckDeliveryRuntime": {
                   "Type": "Task",
                   "Resource": "arn:${Partition}:states:::lambda:invoke",
                   "Parameters": {
                     "FunctionName": "${CleanupFunctionArn}",
                     "Payload": {
                       "action": "status",
-                      "stackName": "order-service-runtime"
+                      "stackName": "delivery-service-runtime"
                     }
                   },
                   "ResultSelector": {
                     "status.$": "$.Payload.status"
                   },
-                  "ResultPath": "$.order",
-                  "Next": "OrderRuntimeStatus"
+                  "ResultPath": "$.delivery",
+                  "Next": "DeliveryRuntimeStatus"
                 },
-                "OrderRuntimeStatus": {
+                "DeliveryRuntimeStatus": {
                   "Type": "Choice",
                   "Choices": [
                     {
-                      "Variable": "$.order.status",
+                      "Variable": "$.delivery.status",
                       "StringEquals": "DELETED",
                       "Next": "DeleteRestaurantRuntime"
                     },
                     {
-                      "Variable": "$.order.status",
+                      "Variable": "$.delivery.status",
                       "StringEquals": "DELETE_FAILED",
-                      "Next": "RetryOrderRuntimeDeletion"
+                      "Next": "RetryDeliveryRuntimeDeletion"
                     }
                   ],
-                  "Default": "WaitOrderRuntime"
+                  "Default": "WaitDeliveryRuntime"
                 },
-                "RetryOrderRuntimeDeletion": {
+                "RetryDeliveryRuntimeDeletion": {
                   "Type": "Wait",
                   "Seconds": 30,
-                  "Next": "DeleteOrderRuntime"
+                  "Next": "DeleteDeliveryRuntime"
                 },
 
                 "DeleteRestaurantRuntime": {

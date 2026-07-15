@@ -1,4 +1,4 @@
-name: Deploy API preview with EventBridge cleanup
+name: Deploy delivery and restaurant preview
 
 on:
   workflow_dispatch:
@@ -15,8 +15,8 @@ on:
         default: "*"
         type: string
 
-      order_container_port:
-        description: Port exposed by order-service
+      delivery_container_port:
+        description: Port exposed by delivery-service
         required: true
         default: "8080"
         type: string
@@ -27,8 +27,8 @@ on:
         default: "8080"
         type: string
 
-      order_health_check_path:
-        description: ALB health-check path for order-service
+      delivery_health_check_path:
+        description: ALB health-check path for delivery-service
         required: true
         default: "/health"
         type: string
@@ -37,6 +37,18 @@ on:
         description: ALB health-check path for restaurant-service
         required: true
         default: "/health"
+        type: string
+
+      delivery_base_path:
+        description: API base path for delivery-service, without trailing slash
+        required: true
+        default: "/api/deliveries"
+        type: string
+
+      restaurant_base_path:
+        description: API base path for restaurant-service, without trailing slash
+        required: true
+        default: "/api/restaurants"
         type: string
 
 permissions:
@@ -75,10 +87,12 @@ jobs:
       - name: Validate inputs
         env:
           LIFETIME_MINUTES: ${{ inputs.lifetime_minutes }}
-          ORDER_CONTAINER_PORT: ${{ inputs.order_container_port }}
+          DELIVERY_CONTAINER_PORT: ${{ inputs.delivery_container_port }}
           RESTAURANT_CONTAINER_PORT: ${{ inputs.restaurant_container_port }}
-          ORDER_HEALTH_PATH: ${{ inputs.order_health_check_path }}
+          DELIVERY_HEALTH_PATH: ${{ inputs.delivery_health_check_path }}
           RESTAURANT_HEALTH_PATH: ${{ inputs.restaurant_health_check_path }}
+          DELIVERY_BASE_PATH: ${{ inputs.delivery_base_path }}
+          RESTAURANT_BASE_PATH: ${{ inputs.restaurant_base_path }}
         run: |
           set -euo pipefail
 
@@ -92,19 +106,29 @@ jobs:
             exit 1
           fi
 
-          for port in "$ORDER_CONTAINER_PORT" "$RESTAURANT_CONTAINER_PORT"; do
+          for port in "$DELIVERY_CONTAINER_PORT" "$RESTAURANT_CONTAINER_PORT"; do
             if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
-              echo "::error::Container ports must be integers between 1 and 65535"
+              echo "::error::Container ports must be between 1 and 65535"
               exit 1
             fi
           done
 
-          for path in "$ORDER_HEALTH_PATH" "$RESTAURANT_HEALTH_PATH"; do
+          for path in \
+            "$DELIVERY_HEALTH_PATH" \
+            "$RESTAURANT_HEALTH_PATH" \
+            "$DELIVERY_BASE_PATH" \
+            "$RESTAURANT_BASE_PATH"
+          do
             if [[ "$path" != /* ]]; then
-              echo "::error::Health-check paths must start with /"
+              echo "::error::Every HTTP path must start with /"
               exit 1
             fi
           done
+
+          if [[ "$DELIVERY_BASE_PATH" == */ || "$RESTAURANT_BASE_PATH" == */ ]]; then
+            echo "::error::Service base paths must not end with /"
+            exit 1
+          fi
 
       - name: Validate CloudFormation templates
         run: |
@@ -169,17 +193,19 @@ jobs:
             exit 0
           fi
 
-          if [[ "$STATUS" == "DELETE_FAILED" ]]; then
-            echo "::error::$PLATFORM_STACK_NAME is in DELETE_FAILED. Run 'Start AWS cleanup now' first."
-            exit 1
-          fi
-
-          if [[ "$STATUS" == "DELETE_IN_PROGRESS" ]]; then
-            echo "::error::$PLATFORM_STACK_NAME is being deleted. Wait for cleanup to finish."
-            exit 1
-          fi
-
-          echo "Existing platform status: $STATUS"
+          case "$STATUS" in
+            DELETE_FAILED)
+              echo "::error::$PLATFORM_STACK_NAME is in DELETE_FAILED. Run 'Start AWS cleanup now'."
+              exit 1
+              ;;
+            DELETE_IN_PROGRESS)
+              echo "::error::$PLATFORM_STACK_NAME is being deleted. Wait for cleanup to finish."
+              exit 1
+              ;;
+            *)
+              echo "Existing platform status: $STATUS"
+              ;;
+          esac
 
       - name: Calculate one-time cleanup time
         id: lifetime
@@ -192,12 +218,10 @@ jobs:
             -d "+${LIFETIME_MINUTES} minutes" \
             "+%Y-%m-%dT%H:%M:%S")
 
-          SCHEDULE_EXPRESSION="at(${DELETE_AT})"
-
-          echo "schedule-expression=$SCHEDULE_EXPRESSION" >> "$GITHUB_OUTPUT"
+          echo "schedule-expression=at(${DELETE_AT})" >> "$GITHUB_OUTPUT"
           echo "delete-at=${DELETE_AT} UTC" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy temporary platform and one-time EventBridge schedule
+      - name: Deploy temporary platform and EventBridge schedule
         run: |
           set -euo pipefail
 
@@ -207,10 +231,12 @@ jobs:
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset \
             --parameter-overrides \
-              OrderServiceContainerPort="${{ inputs.order_container_port }}" \
+              DeliveryServiceContainerPort="${{ inputs.delivery_container_port }}" \
               RestaurantServiceContainerPort="${{ inputs.restaurant_container_port }}" \
-              OrderServiceHealthCheckPath="${{ inputs.order_health_check_path }}" \
+              DeliveryServiceHealthCheckPath="${{ inputs.delivery_health_check_path }}" \
               RestaurantServiceHealthCheckPath="${{ inputs.restaurant_health_check_path }}" \
+              DeliveryServiceBasePath="${{ inputs.delivery_base_path }}" \
+              RestaurantServiceBasePath="${{ inputs.restaurant_base_path }}" \
               CleanupScheduleExpression="${{ steps.lifetime.outputs.schedule-expression }}"
 
       - name: Show deployment summary
@@ -227,10 +253,10 @@ jobs:
             echo "## Food-delivery preview"
             echo
             echo "- API endpoint: ${API_ENDPOINT}"
-            echo "- Orders: ${API_ENDPOINT}/api/orders"
-            echo "- Restaurants: ${API_ENDPOINT}/api/restaurants"
+            echo "- Delivery: ${API_ENDPOINT}${{ inputs.delivery_base_path }}"
+            echo "- Restaurants: ${API_ENDPOINT}${{ inputs.restaurant_base_path }}"
             echo "- Lifetime: ${{ inputs.lifetime_minutes }} minutes"
             echo "- Scheduled AWS cleanup: ${{ steps.lifetime.outputs.delete-at }}"
             echo
-            echo "GitHub Actions has finished. EventBridge Scheduler will start Step Functions at the scheduled time."
+            echo "GitHub Actions has finished. EventBridge Scheduler will start Step Functions."
           } >> "$GITHUB_STEP_SUMMARY"

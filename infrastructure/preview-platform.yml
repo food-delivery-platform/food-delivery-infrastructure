@@ -1,23 +1,44 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Temporary ECS cluster, internal ALB, API integration, routes, target groups, and security groups.
+
+Description: >-
+  Temporary ECS cluster, internal ALB, API Gateway routes and integration,
+  delivery-service and restaurant-service target groups, security groups,
+  and a one-time EventBridge Scheduler cleanup schedule.
 
 Parameters:
-  OrderServiceContainerPort:
+  DeliveryServiceContainerPort:
     Type: Number
     Default: 8080
+    MinValue: 1
+    MaxValue: 65535
+
   RestaurantServiceContainerPort:
     Type: Number
     Default: 8080
-  OrderServiceHealthCheckPath:
+    MinValue: 1
+    MaxValue: 65535
+
+  DeliveryServiceHealthCheckPath:
     Type: String
     Default: "/health"
+
   RestaurantServiceHealthCheckPath:
     Type: String
     Default: "/health"
 
+  DeliveryServiceBasePath:
+    Type: String
+    Default: "/api/deliveries"
+    Description: API base path without a trailing slash.
+
+  RestaurantServiceBasePath:
+    Type: String
+    Default: "/api/restaurants"
+    Description: API base path without a trailing slash.
+
   CleanupScheduleExpression:
     Type: String
-    Description: One-time EventBridge Scheduler expression, for example at(2026-07-15T18:30:00).
+    Description: One-time expression such as at(2026-07-15T18:30:00).
 
 Resources:
   PreviewCluster:
@@ -27,37 +48,60 @@ Resources:
       ClusterSettings:
         - Name: containerInsights
           Value: disabled
+      Tags:
+        - Key: Project
+          Value: food-delivery
+        - Key: Environment
+          Value: preview
+        - Key: Lifetime
+          Value: temporary
 
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: API Gateway VPC Link access to internal ALB
+      GroupDescription: API Gateway VPC Link access to the internal ALB
       VpcId:
         Fn::ImportValue: food-delivery-network-vpc-id
       SecurityGroupIngress:
-        - IpProtocol: tcp
+        - Description: VPC Link to internal ALB
+          IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           SourceSecurityGroupId:
             Fn::ImportValue: food-delivery-vpc-link-sg-id
       SecurityGroupEgress:
-        - IpProtocol: "-1"
+        - Description: ALB traffic to Fargate tasks
+          IpProtocol: "-1"
           CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: food-delivery-preview-internal-alb-sg
+        - Key: Lifetime
+          Value: temporary
 
-  OrderTaskSecurityGroup:
+  DeliveryTaskSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Internal ALB access to order-service
+      GroupDescription: Internal ALB access to delivery-service
       VpcId:
         Fn::ImportValue: food-delivery-network-vpc-id
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: !Ref OrderServiceContainerPort
-          ToPort: !Ref OrderServiceContainerPort
+        - Description: ALB to delivery-service
+          IpProtocol: tcp
+          FromPort: !Ref DeliveryServiceContainerPort
+          ToPort: !Ref DeliveryServiceContainerPort
           SourceSecurityGroupId: !Ref AlbSecurityGroup
       SecurityGroupEgress:
-        - IpProtocol: "-1"
+        - Description: Outbound application traffic
+          IpProtocol: "-1"
           CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: food-delivery-delivery-task-sg
+        - Key: Service
+          Value: delivery-service
+        - Key: Lifetime
+          Value: temporary
 
   RestaurantTaskSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -66,13 +110,22 @@ Resources:
       VpcId:
         Fn::ImportValue: food-delivery-network-vpc-id
       SecurityGroupIngress:
-        - IpProtocol: tcp
+        - Description: ALB to restaurant-service
+          IpProtocol: tcp
           FromPort: !Ref RestaurantServiceContainerPort
           ToPort: !Ref RestaurantServiceContainerPort
           SourceSecurityGroupId: !Ref AlbSecurityGroup
       SecurityGroupEgress:
-        - IpProtocol: "-1"
+        - Description: Outbound application traffic
+          IpProtocol: "-1"
           CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Name
+          Value: food-delivery-restaurant-task-sg
+        - Key: Service
+          Value: restaurant-service
+        - Key: Lifetime
+          Value: temporary
 
   InternalLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -86,19 +139,41 @@ Resources:
       Subnets:
         - Fn::ImportValue: food-delivery-network-public-subnet-a-id
         - Fn::ImportValue: food-delivery-network-public-subnet-b-id
+      Tags:
+        - Key: Project
+          Value: food-delivery
+        - Key: Environment
+          Value: preview
+        - Key: Lifetime
+          Value: temporary
 
-  OrderTargetGroup:
+  DeliveryTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: food-delivery-order-preview
+      Name: food-delivery-delivery-preview
       VpcId:
         Fn::ImportValue: food-delivery-network-vpc-id
       Protocol: HTTP
-      Port: !Ref OrderServiceContainerPort
+      Port: !Ref DeliveryServiceContainerPort
       TargetType: ip
-      HealthCheckPath: !Ref OrderServiceHealthCheckPath
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      HealthCheckPath: !Ref DeliveryServiceHealthCheckPath
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
       Matcher:
         HttpCode: "200-399"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "15"
+      Tags:
+        - Key: Service
+          Value: delivery-service
+        - Key: Lifetime
+          Value: temporary
 
   RestaurantTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -109,9 +184,24 @@ Resources:
       Protocol: HTTP
       Port: !Ref RestaurantServiceContainerPort
       TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
       HealthCheckPath: !Ref RestaurantServiceHealthCheckPath
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
       Matcher:
         HttpCode: "200-399"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "15"
+      Tags:
+        - Key: Service
+          Value: restaurant-service
+        - Key: Lifetime
+          Value: temporary
 
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -126,7 +216,7 @@ Resources:
             StatusCode: "404"
             MessageBody: '{"message":"route not found"}'
 
-  OrderListenerRule:
+  DeliveryListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
       ListenerArn: !Ref HttpListener
@@ -135,11 +225,11 @@ Resources:
         - Field: path-pattern
           PathPatternConfig:
             Values:
-              - "/api/orders"
-              - "/api/orders/*"
+              - !Ref DeliveryServiceBasePath
+              - !Sub "${DeliveryServiceBasePath}/*"
       Actions:
         - Type: forward
-          TargetGroupArn: !Ref OrderTargetGroup
+          TargetGroupArn: !Ref DeliveryTargetGroup
 
   RestaurantListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
@@ -150,8 +240,8 @@ Resources:
         - Field: path-pattern
           PathPatternConfig:
             Values:
-              - "/api/restaurants"
-              - "/api/restaurants/*"
+              - !Ref RestaurantServiceBasePath
+              - !Sub "${RestaurantServiceBasePath}/*"
       Actions:
         - Type: forward
           TargetGroupArn: !Ref RestaurantTargetGroup
@@ -161,6 +251,7 @@ Resources:
     Properties:
       ApiId:
         Fn::ImportValue: food-delivery-http-api-id
+      Description: API Gateway private HTTP proxy to the internal ALB
       IntegrationType: HTTP_PROXY
       IntegrationMethod: ANY
       ConnectionType: VPC_LINK
@@ -174,23 +265,23 @@ Resources:
         "overwrite:header.x-user-email": "$context.authorizer.claims.email"
         "overwrite:header.x-request-id": "$context.requestId"
 
-  OrderBaseRoute:
+  DeliveryBaseRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId:
         Fn::ImportValue: food-delivery-http-api-id
-      RouteKey: "ANY /api/orders"
+      RouteKey: !Sub "ANY ${DeliveryServiceBasePath}"
       AuthorizationType: JWT
       AuthorizerId:
         Fn::ImportValue: food-delivery-jwt-authorizer-id
       Target: !Join ["/", ["integrations", !Ref PrivateAlbIntegration]]
 
-  OrderProxyRoute:
+  DeliveryProxyRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId:
         Fn::ImportValue: food-delivery-http-api-id
-      RouteKey: "ANY /api/orders/{proxy+}"
+      RouteKey: !Sub "ANY ${DeliveryServiceBasePath}/{proxy+}"
       AuthorizationType: JWT
       AuthorizerId:
         Fn::ImportValue: food-delivery-jwt-authorizer-id
@@ -201,7 +292,7 @@ Resources:
     Properties:
       ApiId:
         Fn::ImportValue: food-delivery-http-api-id
-      RouteKey: "ANY /api/restaurants"
+      RouteKey: !Sub "ANY ${RestaurantServiceBasePath}"
       AuthorizationType: JWT
       AuthorizerId:
         Fn::ImportValue: food-delivery-jwt-authorizer-id
@@ -212,7 +303,7 @@ Resources:
     Properties:
       ApiId:
         Fn::ImportValue: food-delivery-http-api-id
-      RouteKey: "ANY /api/restaurants/{proxy+}"
+      RouteKey: !Sub "ANY ${RestaurantServiceBasePath}/{proxy+}"
       AuthorizationType: JWT
       AuthorizerId:
         Fn::ImportValue: food-delivery-jwt-authorizer-id
@@ -222,7 +313,7 @@ Resources:
     Type: AWS::Scheduler::Schedule
     Properties:
       Name: food-delivery-preview-cleanup
-      Description: Delete temporary food-delivery runtime after its lifetime expires
+      Description: Delete the temporary food-delivery runtime after expiration
       State: ENABLED
       ScheduleExpression: !Ref CleanupScheduleExpression
       ScheduleExpressionTimezone: UTC
@@ -241,17 +332,26 @@ Resources:
 Outputs:
   ClusterName:
     Value: !Ref PreviewCluster
-  OrderTargetGroupArn:
-    Value: !Ref OrderTargetGroup
+
+  DeliveryTargetGroupArn:
+    Value: !Ref DeliveryTargetGroup
+
   RestaurantTargetGroupArn:
     Value: !Ref RestaurantTargetGroup
-  OrderTaskSecurityGroupId:
-    Value: !Ref OrderTaskSecurityGroup
+
+  DeliveryTaskSecurityGroupId:
+    Value: !Ref DeliveryTaskSecurityGroup
+
   RestaurantTaskSecurityGroupId:
     Value: !Ref RestaurantTaskSecurityGroup
+
   SubnetIds:
     Value:
       Fn::ImportValue: food-delivery-network-public-subnet-ids
+
   ApiEndpoint:
     Value:
       Fn::ImportValue: food-delivery-http-api-endpoint
+
+  CleanupScheduleExpression:
+    Value: !Ref CleanupScheduleExpression
