@@ -13,15 +13,35 @@ on:
         required: false
         default: ""
         type: string
-      container_port:
-        description: Port expected from order-service
+      order_container_port:
+        description: Port exposed by order-service
         required: true
         default: "8080"
         type: string
-      health_check_path:
-        description: ALB health-check path for order-service
+      restaurant_container_port:
+        description: Port exposed by restaurant-service
+        required: true
+        default: "8080"
+        type: string
+      order_health_check_path:
+        description: Health-check path for order-service
         required: true
         default: "/health"
+        type: string
+      restaurant_health_check_path:
+        description: Health-check path for restaurant-service
+        required: true
+        default: "/health"
+        type: string
+      order_path_pattern:
+        description: ALB path pattern for order-service
+        required: true
+        default: "/api/orders*"
+        type: string
+      restaurant_path_pattern:
+        description: ALB path pattern for restaurant-service
+        required: true
+        default: "/api/restaurants*"
         type: string
 
 permissions:
@@ -37,6 +57,7 @@ env:
   NETWORK_STACK_NAME: food-delivery-network
   PLATFORM_STACK_NAME: food-delivery-preview-platform
   ORDER_RUNTIME_STACK_NAME: order-service-runtime
+  RESTAURANT_RUNTIME_STACK_NAME: restaurant-service-runtime
   NETWORK_TEMPLATE_FILE: infrastructure/network.yml
   PLATFORM_TEMPLATE_FILE: infrastructure/preview-platform.yml
 
@@ -49,15 +70,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials through OIDC
+      - name: Configure AWS credentials for deployment
         uses: aws-actions/configure-aws-credentials@v6.2.2
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          role-session-name: preview-platform-${{ github.run_id }}
+          role-session-name: preview-deploy-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
 
-      - name: Validate workflow inputs
+      - name: Validate inputs
         id: config
         env:
           INPUT_LIFETIME: ${{ inputs.lifetime_minutes }}
@@ -66,7 +87,7 @@ jobs:
           set -euo pipefail
 
           if ! [[ "$INPUT_LIFETIME" =~ ^[0-9]+$ ]]; then
-            echo "::error::lifetime_minutes must be a positive integer"
+            echo "::error::lifetime_minutes must be an integer"
             exit 1
           fi
 
@@ -86,39 +107,63 @@ jobs:
       - name: Validate CloudFormation templates
         run: |
           set -euo pipefail
-          aws cloudformation validate-template --template-body "file://${NETWORK_TEMPLATE_FILE}" --region "$AWS_REGION" >/dev/null
-          aws cloudformation validate-template --template-body "file://${PLATFORM_TEMPLATE_FILE}" --region "$AWS_REGION" >/dev/null
 
-      - name: Create or update permanent network
+          aws cloudformation validate-template \
+            --template-body "file://${NETWORK_TEMPLATE_FILE}" \
+            --region "$AWS_REGION" \
+            >/dev/null
+
+          aws cloudformation validate-template \
+            --template-body "file://${PLATFORM_TEMPLATE_FILE}" \
+            --region "$AWS_REGION" \
+            >/dev/null
+
+      - name: Deploy permanent network
         run: |
           set -euo pipefail
+
           aws cloudformation deploy \
             --stack-name "$NETWORK_STACK_NAME" \
             --template-file "$NETWORK_TEMPLATE_FILE" \
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset \
-            --tags Project=food-delivery Layer=network Lifetime=permanent ManagedBy=GitHubActions
+            --tags \
+              Project=food-delivery \
+              Layer=network \
+              Lifetime=permanent \
+              ManagedBy=GitHubActions
 
-      - name: Create or update temporary preview platform
-        id: deploy-platform
+      - name: Deploy temporary platform
+        id: platform
         continue-on-error: true
         run: |
           set -euo pipefail
+
           aws cloudformation deploy \
             --stack-name "$PLATFORM_STACK_NAME" \
             --template-file "$PLATFORM_TEMPLATE_FILE" \
             --region "$AWS_REGION" \
             --no-fail-on-empty-changeset \
-            --tags Project=food-delivery Environment=preview Lifetime=temporary ManagedBy=GitHubActions GitHubRunId="${GITHUB_RUN_ID}" \
+            --tags \
+              Project=food-delivery \
+              Environment=preview \
+              Lifetime=temporary \
+              ManagedBy=GitHubActions \
+              GitHubRunId="${GITHUB_RUN_ID}" \
             --parameter-overrides \
               AllowedCidr="${{ steps.config.outputs.allowed-cidr }}" \
-              OrderServiceContainerPort="${{ inputs.container_port }}" \
-              OrderServiceHealthCheckPath="${{ inputs.health_check_path }}"
+              OrderServiceContainerPort="${{ inputs.order_container_port }}" \
+              RestaurantServiceContainerPort="${{ inputs.restaurant_container_port }}" \
+              OrderServiceHealthCheckPath="${{ inputs.order_health_check_path }}" \
+              RestaurantServiceHealthCheckPath="${{ inputs.restaurant_health_check_path }}" \
+              OrderServicePathPattern="${{ inputs.order_path_pattern }}" \
+              RestaurantServicePathPattern="${{ inputs.restaurant_path_pattern }}"
 
       - name: Show platform outputs
-        if: steps.deploy-platform.outcome == 'success'
+        if: steps.platform.outcome == 'success'
         run: |
           set -euo pipefail
+
           aws cloudformation describe-stacks \
             --stack-name "$PLATFORM_STACK_NAME" \
             --region "$AWS_REGION" \
@@ -132,46 +177,71 @@ jobs:
             --output text)
 
           {
-            echo "## Temporary preview platform"
+            echo "## Temporary food-delivery platform"
             echo
-            echo "- URL: ${PUBLIC_URL}"
+            echo "- Base URL: ${PUBLIC_URL}"
             echo "- Lifetime: ${{ steps.config.outputs.lifetime-minutes }} minutes"
-            echo "- Network stack remains after cleanup"
-            echo "- Next step: run the order-service deployment workflow"
+            echo "- Run the service deployment workflows while this platform exists."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Keep platform for requested lifetime
-        if: steps.deploy-platform.outcome == 'success'
+      - name: Keep temporary resources alive
+        if: steps.platform.outcome == 'success'
         run: |
           set -euo pipefail
-          SECONDS_TO_WAIT=$(( ${{ steps.config.outputs.lifetime-minutes }} * 60 ))
-          sleep "$SECONDS_TO_WAIT"
+          sleep $(( ${{ steps.config.outputs.lifetime-minutes }} * 60 ))
 
-      - name: Delete runtime and temporary platform
+      # Critical fix: the credentials obtained before the one-hour sleep normally
+      # expire after 3600 seconds. Obtain a fresh OIDC session before cleanup.
+      - name: Refresh AWS credentials before cleanup
+        if: always()
+        uses: aws-actions/configure-aws-credentials@v6.2.2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: preview-cleanup-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Delete service runtimes and temporary platform
         if: always()
         run: |
           set -euo pipefail
 
           stack_exists() {
-            aws cloudformation describe-stacks --stack-name "$1" --region "$AWS_REGION" >/dev/null 2>&1
+            aws cloudformation describe-stacks \
+              --stack-name "$1" \
+              --region "$AWS_REGION" \
+              >/dev/null 2>&1
           }
 
           delete_stack() {
             local stack_name="$1"
+
             if ! stack_exists "$stack_name"; then
-              echo "Stack $stack_name does not exist; nothing to delete."
+              echo "Stack $stack_name does not exist."
               return 0
             fi
-            aws cloudformation delete-stack --stack-name "$stack_name" --region "$AWS_REGION"
-            aws cloudformation wait stack-delete-complete --stack-name "$stack_name" --region "$AWS_REGION"
+
+            echo "Deleting $stack_name..."
+            aws cloudformation delete-stack \
+              --stack-name "$stack_name" \
+              --region "$AWS_REGION"
+
+            aws cloudformation wait stack-delete-complete \
+              --stack-name "$stack_name" \
+              --region "$AWS_REGION"
+
+            echo "Deleted $stack_name."
           }
 
           delete_stack "$ORDER_RUNTIME_STACK_NAME"
+          delete_stack "$RESTAURANT_RUNTIME_STACK_NAME"
           delete_stack "$PLATFORM_STACK_NAME"
-          echo "Permanent network stack $NETWORK_STACK_NAME was not deleted."
 
-      - name: Fail workflow when platform deployment failed
-        if: steps.deploy-platform.outcome != 'success'
+          echo "Permanent network stack $NETWORK_STACK_NAME remains."
+
+      - name: Report platform deployment failure
+        if: steps.platform.outcome != 'success'
         run: |
-          echo "::error::The preview platform deployment failed. Temporary resources were cleaned up."
+          echo "::error::Preview platform deployment failed."
           exit 1
