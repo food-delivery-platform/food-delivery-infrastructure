@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Permanent cleanup mechanism. EventBridge Scheduler starts a Step Functions
+  workflow which deletes service runtime stacks and then the preview platform.
+
+Resources:
+  CleanupFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: food-delivery-cleanup-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DeletePreviewStacks
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DeleteStack
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/order-service-runtime/*"
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/restaurant-service-runtime/*"
+                  - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/food-delivery-preview-platform/*"
+
+  CleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: food-delivery-preview-stack-cleanup
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt CleanupFunctionRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import boto3
+          from botocore.exceptions import ClientError
+
+          cloudformation = boto3.client("cloudformation")
+
+          ALLOWED_STACKS = {
+              "order-service-runtime",
+              "restaurant-service-runtime",
+              "food-delivery-preview-platform",
+          }
+
+          def find_stack(stack_name):
+              try:
+                  response = cloudformation.describe_stacks(StackName=stack_name)
+                  return response["Stacks"][0]
+              except ClientError as exc:
+                  error = exc.response.get("Error", {})
+                  code = error.get("Code", "")
+                  message = error.get("Message", "")
+                  if code == "ValidationError" and "does not exist" in message:
+                      return None
+                  raise
+
+          def handler(event, context):
+              action = event.get("action")
+              stack_name = event.get("stackName")
+
+              if stack_name not in ALLOWED_STACKS:
+                  raise ValueError(f"Refusing to manage unexpected stack: {stack_name}")
+
+              stack = find_stack(stack_name)
+
+              if stack is None:
+                  return {"status": "DELETED", "stackName": stack_name}
+
+              status = stack["StackStatus"]
+
+              if status == "DELETE_FAILED":
+                  raise RuntimeError(f"{stack_name} is in DELETE_FAILED")
+
+              if action == "delete":
+                  if status != "DELETE_IN_PROGRESS":
+                      cloudformation.delete_stack(StackName=stack_name)
+                  return {"status": "DELETE_IN_PROGRESS", "stackName": stack_name}
+
+              if action == "status":
+                  return {"status": status, "stackName": stack_name}
+
+              raise ValueError(f"Unknown action: {action}")
+
+  CleanupStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: food-delivery-cleanup-step-functions-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeCleanupLambda
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt CleanupFunction.Arn
+
+  CleanupStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: food-delivery-preview-cleanup
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt CleanupStateMachineRole.Arn
+      DefinitionString:
+        Fn::Sub:
+          - |
+            {
+              "Comment": "Delete service runtimes and then the shared preview platform",
+              "StartAt": "DeleteOrderRuntime",
+              "States": {
+                "DeleteOrderRuntime": {
+                  "Type": "Task",
+                  "Resource": "arn:${Partition}:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${CleanupFunctionArn}",
+                    "Payload": {"action": "delete", "stackName": "order-service-runtime"}
+                  },
+                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultPath": "$.order",
+                  "Next": "WaitOrderRuntime"
+                },
+                "WaitOrderRuntime": {"Type": "Wait", "Seconds": 20, "Next": "CheckOrderRuntime"},
+                "CheckOrderRuntime": {
+                  "Type": "Task",
+                  "Resource": "arn:${Partition}:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${CleanupFunctionArn}",
+                    "Payload": {"action": "status", "stackName": "order-service-runtime"}
+                  },
+                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultPath": "$.order",
+                  "Next": "IsOrderRuntimeDeleted"
+                },
+                "IsOrderRuntimeDeleted": {
+                  "Type": "Choice",
+                  "Choices": [{"Variable": "$.order.status", "StringEquals": "DELETED", "Next": "DeleteRestaurantRuntime"}],
+                  "Default": "WaitOrderRuntime"
+                },
+                "DeleteRestaurantRuntime": {
+                  "Type": "Task",
+                  "Resource": "arn:${Partition}:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${CleanupFunctionArn}",
+                    "Payload": {"action": "delete", "stackName": "restaurant-service-runtime"}
+                  },
+                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultPath": "$.restaurant",
+                  "Next": "WaitRestaurantRuntime"
+                },
+                "WaitRestaurantRuntime": {"Type": "Wait", "Seconds": 20, "Next": "CheckRestaurantRuntime"},
+                "CheckRestaurantRuntime": {
+                  "Type": "Task",
+                  "Resource": "arn:${Partition}:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${CleanupFunctionArn}",
+                    "Payload": {"action": "status", "stackName": "restaurant-service-runtime"}
+                  },
+                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultPath": "$.restaurant",
+                  "Next": "IsRestaurantRuntimeDeleted"
+                },
+                "IsRestaurantRuntimeDeleted": {
+                  "Type": "Choice",
+                  "Choices": [{"Variable": "$.restaurant.status", "StringEquals": "DELETED", "Next": "DeletePreviewPlatform"}],
+                  "Default": "WaitRestaurantRuntime"
+                },
+                "DeletePreviewPlatform": {
+                  "Type": "Task",
+                  "Resource": "arn:${Partition}:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${CleanupFunctionArn}",
+                    "Payload": {"action": "delete", "stackName": "food-delivery-preview-platform"}
+                  },
+                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultPath": "$.platform",
+                  "Next": "WaitPreviewPlatform"
+                },
+                "WaitPreviewPlatform": {"Type": "Wait", "Seconds": 20, "Next": "CheckPreviewPlatform"},
+                "CheckPreviewPlatform": {
+                  "Type": "Task",
+                  "Resource": "arn:${Partition}:states:::lambda:invoke",
+                  "Parameters": {
+                    "FunctionName": "${CleanupFunctionArn}",
+                    "Payload": {"action": "status", "stackName": "food-delivery-preview-platform"}
+                  },
+                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultPath": "$.platform",
+                  "Next": "IsPreviewPlatformDeleted"
+                },
+                "IsPreviewPlatformDeleted": {
+                  "Type": "Choice",
+                  "Choices": [{"Variable": "$.platform.status", "StringEquals": "DELETED", "Next": "CleanupComplete"}],
+                  "Default": "WaitPreviewPlatform"
+                },
+                "CleanupComplete": {"Type": "Succeed"}
+              }
+            }
+          - Partition: !Ref AWS::Partition
+            CleanupFunctionArn: !GetAtt CleanupFunction.Arn
+
+  SchedulerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: food-delivery-cleanup-scheduler-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - scheduler.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: StartCleanupStateMachine
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref CleanupStateMachine
+
+Outputs:
+  CleanupStateMachineArn:
+    Value: !Ref CleanupStateMachine
+    Export:
+      Name: food-delivery-cleanup-state-machine-arn
+
+  SchedulerExecutionRoleArn:
+    Value: !GetAtt SchedulerExecutionRole.Arn
+    Export:
+      Name: food-delivery-cleanup-scheduler-role-arn

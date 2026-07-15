@@ -1,0 +1,39 @@
+name: Start AWS cleanup now
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  CLEANUP_STACK_NAME: food-delivery-cleanup
+
+jobs:
+  start-cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.2.2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: manual-cleanup-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Start permanent cleanup state machine
+        run: |
+          set -euo pipefail
+
+          STATE_MACHINE_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "$CLEANUP_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='CleanupStateMachineArn'].OutputValue" \
+            --output text)
+
+          aws stepfunctions start-execution \
+            --state-machine-arn "$STATE_MACHINE_ARN" \
+            --input '{}' \
+            --region "$AWS_REGION"

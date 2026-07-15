@@ -1,19 +1,13 @@
 AWSTemplateFormatVersion: "2010-09-09"
-
-Description: >-
-  Permanent network for the food-delivery preview environment.
-  Creates one VPC, an Internet Gateway, two public subnets in different
-  Availability Zones, one public route table, and internet routes.
+Description: Permanent network for the food-delivery platform.
 
 Parameters:
   VpcCidr:
     Type: String
     Default: "10.40.0.0/16"
-
   PublicSubnetACidr:
     Type: String
     Default: "10.40.1.0/24"
-
   PublicSubnetBCidr:
     Type: String
     Default: "10.40.2.0/24"
@@ -25,14 +19,13 @@ Resources:
       CidrBlock: !Ref VpcCidr
       EnableDnsSupport: true
       EnableDnsHostnames: true
-      InstanceTenancy: default
       Tags:
         - Key: Name
           Value: food-delivery-vpc
         - Key: Project
           Value: food-delivery
-        - Key: ManagedBy
-          Value: CloudFormation
+        - Key: Lifetime
+          Value: permanent
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
@@ -42,8 +35,6 @@ Resources:
           Value: food-delivery-igw
         - Key: Project
           Value: food-delivery
-        - Key: ManagedBy
-          Value: CloudFormation
 
   InternetGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -61,12 +52,8 @@ Resources:
       Tags:
         - Key: Name
           Value: food-delivery-public-a
-        - Key: Project
-          Value: food-delivery
         - Key: Network
           Value: public
-        - Key: ManagedBy
-          Value: CloudFormation
 
   PublicSubnetB:
     Type: AWS::EC2::Subnet
@@ -78,12 +65,8 @@ Resources:
       Tags:
         - Key: Name
           Value: food-delivery-public-b
-        - Key: Project
-          Value: food-delivery
         - Key: Network
           Value: public
-        - Key: ManagedBy
-          Value: CloudFormation
 
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
@@ -92,10 +75,6 @@ Resources:
       Tags:
         - Key: Name
           Value: food-delivery-public-rt
-        - Key: Project
-          Value: food-delivery
-        - Key: ManagedBy
-          Value: CloudFormation
 
   DefaultInternetRoute:
     Type: AWS::EC2::Route
@@ -122,17 +101,18 @@ Outputs:
     Value: !Ref FoodDeliveryVpc
     Export:
       Name: food-delivery-network-vpc-id
-
+  VpcCidr:
+    Value: !Ref VpcCidr
+    Export:
+      Name: food-delivery-network-vpc-cidr
   PublicSubnetAId:
     Value: !Ref PublicSubnetA
     Export:
       Name: food-delivery-network-public-subnet-a-id
-
   PublicSubnetBId:
     Value: !Ref PublicSubnetB
     Export:
       Name: food-delivery-network-public-subnet-b-id
-
   PublicSubnetIds:
     Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]
     Export:

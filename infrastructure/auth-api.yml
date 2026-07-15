@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Permanent Cognito, API Gateway HTTP API, JWT authorizer, logs, and VPC Link.
+
+Parameters:
+  CorsAllowedOrigin:
+    Type: String
+    Default: "*"
+
+Resources:
+  FoodDeliveryUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: food-delivery-users
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+      UserPoolTags:
+        Project: food-delivery
+        Lifetime: permanent
+
+  FoodDeliveryUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: food-delivery-web
+      UserPoolId: !Ref FoodDeliveryUserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      ReadAttributes:
+        - email
+        - email_verified
+        - name
+      WriteAttributes:
+        - email
+        - name
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: food-delivery-http-api
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref CorsAllowedOrigin
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+          - X-Request-Id
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+          - OPTIONS
+        MaxAge: 3600
+      Tags:
+        Project: food-delivery
+        Lifetime: permanent
+
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: food-delivery-cognito-jwt
+      AuthorizerType: JWT
+      IdentitySource:
+        - "$request.header.Authorization"
+      JwtConfiguration:
+        Audience:
+          - !Ref FoodDeliveryUserPoolClient
+        Issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${FoodDeliveryUserPool}"
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/apigateway/food-delivery-http-api
+      RetentionInDays: 7
+
+  DefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: "$default"
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","routeKey":"$context.routeKey","status":"$context.status","sourceIp":"$context.identity.sourceIp","userId":"$context.authorizer.claims.sub","integrationError":"$context.integration.error"}
+      DefaultRouteSettings:
+        DetailedMetricsEnabled: true
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
+
+  VpcLinkSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: API Gateway VPC Link network interfaces
+      VpcId:
+        Fn::ImportValue: food-delivery-network-vpc-id
+      SecurityGroupEgress:
+        - Description: HTTP to internal ALB
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Fn::ImportValue: food-delivery-network-vpc-cidr
+
+  FoodDeliveryVpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties:
+      Name: food-delivery-vpc-link
+      SecurityGroupIds:
+        - !Ref VpcLinkSecurityGroup
+      SubnetIds:
+        - Fn::ImportValue: food-delivery-network-public-subnet-a-id
+        - Fn::ImportValue: food-delivery-network-public-subnet-b-id
+      Tags:
+        Project: food-delivery
+        Lifetime: permanent
+
+Outputs:
+  ApiId:
+    Value: !Ref HttpApi
+    Export:
+      Name: food-delivery-http-api-id
+  ApiEndpoint:
+    Value: !GetAtt HttpApi.ApiEndpoint
+    Export:
+      Name: food-delivery-http-api-endpoint
+  AuthorizerId:
+    Value: !Ref JwtAuthorizer
+    Export:
+      Name: food-delivery-jwt-authorizer-id
+  VpcLinkId:
+    Value: !Ref FoodDeliveryVpcLink
+    Export:
+      Name: food-delivery-vpc-link-id
+  VpcLinkSecurityGroupId:
+    Value: !Ref VpcLinkSecurityGroup
+    Export:
+      Name: food-delivery-vpc-link-sg-id
+  CognitoUserPoolId:
+    Value: !Ref FoodDeliveryUserPool
+    Export:
+      Name: food-delivery-cognito-user-pool-id
+  CognitoUserPoolClientId:
+    Value: !Ref FoodDeliveryUserPoolClient
+    Export:
+      Name: food-delivery-cognito-client-id
+  CognitoIssuer:
+    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${FoodDeliveryUserPool}"
