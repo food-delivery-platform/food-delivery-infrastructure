@@ -1,48 +1,19 @@
-name: Deploy API preview with EventBridge cleanup
+name: Deploy cleanup permissions fix
 
 on:
   workflow_dispatch:
-    inputs:
-      lifetime_minutes:
-        description: How long temporary runtime resources should live
-        required: true
-        default: "60"
-        type: string
-      cors_allowed_origin:
-        description: Frontend origin allowed by API Gateway CORS
-        required: true
-        default: "*"
-        type: string
-      order_container_port:
-        description: Port exposed by order-service
-        required: true
-        default: "8080"
-        type: string
-      restaurant_container_port:
-        description: Port exposed by restaurant-service
-        required: true
-        default: "8080"
-        type: string
 
 permissions:
   contents: read
   id-token: write
 
-concurrency:
-  group: food-delivery-preview-platform
-  cancel-in-progress: false
-
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
-  NETWORK_STACK_NAME: food-delivery-network
-  AUTH_API_STACK_NAME: food-delivery-auth-api
   CLEANUP_STACK_NAME: food-delivery-cleanup
-  PLATFORM_STACK_NAME: food-delivery-preview-platform
 
 jobs:
-  deploy:
+  deploy-fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -52,62 +23,23 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v6.2.2
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          role-session-name: preview-deploy-${{ github.run_id }}
+          role-session-name: cleanup-fix-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
 
-      - name: Validate lifetime
-        env:
-          LIFETIME_MINUTES: ${{ inputs.lifetime_minutes }}
+      - name: Validate cleanup template
         run: |
           set -euo pipefail
 
-          if ! [[ "$LIFETIME_MINUTES" =~ ^[0-9]+$ ]]; then
-            echo "::error::lifetime_minutes must be an integer"
-            exit 1
-          fi
+          aws cloudformation validate-template \
+            --template-body file://infrastructure/cleanup.yml \
+            --region "$AWS_REGION" \
+            >/dev/null
 
-          if (( LIFETIME_MINUTES < 5 || LIFETIME_MINUTES > 1440 )); then
-            echo "::error::lifetime_minutes must be between 5 and 1440"
-            exit 1
-          fi
-
-      - name: Validate CloudFormation templates
+      - name: Update permanent cleanup stack
         run: |
           set -euo pipefail
 
-          for template in \
-            infrastructure/network.yml \
-            infrastructure/auth-api.yml \
-            infrastructure/cleanup.yml \
-            infrastructure/preview-platform.yml
-          do
-            aws cloudformation validate-template \
-              --template-body "file://${template}" \
-              --region "$AWS_REGION" \
-              >/dev/null
-          done
-
-      - name: Deploy permanent network
-        run: |
-          aws cloudformation deploy \
-            --stack-name "$NETWORK_STACK_NAME" \
-            --template-file infrastructure/network.yml \
-            --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset
-
-      - name: Deploy permanent Cognito and API Gateway
-        run: |
-          aws cloudformation deploy \
-            --stack-name "$AUTH_API_STACK_NAME" \
-            --template-file infrastructure/auth-api.yml \
-            --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset \
-            --parameter-overrides \
-              CorsAllowedOrigin="${{ inputs.cors_allowed_origin }}"
-
-      - name: Deploy permanent cleanup workflow
-        run: |
           aws cloudformation deploy \
             --stack-name "$CLEANUP_STACK_NAME" \
             --template-file infrastructure/cleanup.yml \
@@ -115,48 +47,19 @@ jobs:
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
 
-      - name: Calculate one-time cleanup time
-        id: lifetime
-        env:
-          LIFETIME_MINUTES: ${{ inputs.lifetime_minutes }}
+      - name: Show fixed role
         run: |
           set -euo pipefail
 
-          DELETE_AT=$(date -u -d "+${LIFETIME_MINUTES} minutes" "+%Y-%m-%dT%H:%M:%S")
-          SCHEDULE_EXPRESSION="at(${DELETE_AT})"
-
-          echo "schedule-expression=$SCHEDULE_EXPRESSION" >> "$GITHUB_OUTPUT"
-          echo "delete-at=${DELETE_AT} UTC" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy temporary platform and EventBridge schedule
-        run: |
-          aws cloudformation deploy \
-            --stack-name "$PLATFORM_STACK_NAME" \
-            --template-file infrastructure/preview-platform.yml \
+          ROLE_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "$CLEANUP_STACK_NAME" \
             --region "$AWS_REGION" \
-            --no-fail-on-empty-changeset \
-            --parameter-overrides \
-              OrderServiceContainerPort="${{ inputs.order_container_port }}" \
-              RestaurantServiceContainerPort="${{ inputs.restaurant_container_port }}" \
-              CleanupScheduleExpression="${{ steps.lifetime.outputs.schedule-expression }}"
-
-      - name: Show deployment summary
-        run: |
-          set -euo pipefail
-
-          API_ENDPOINT=$(aws cloudformation describe-stacks \
-            --stack-name "$AUTH_API_STACK_NAME" \
-            --region "$AWS_REGION" \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFormationExecutionRoleArn'].OutputValue" \
             --output text)
 
           {
-            echo "## Food-delivery preview"
+            echo "## Cleanup permissions fixed"
             echo
-            echo "- API endpoint: ${API_ENDPOINT}"
-            echo "- Orders: ${API_ENDPOINT}/api/orders"
-            echo "- Restaurants: ${API_ENDPOINT}/api/restaurants"
-            echo "- Scheduled cleanup: ${{ steps.lifetime.outputs.delete-at }}"
-            echo
-            echo "GitHub Actions is finished. EventBridge Scheduler will start the AWS cleanup workflow."
+            echo "- CloudFormation execution role: ${ROLE_ARN}"
+            echo "- Next: run **Start AWS cleanup now**"
           } >> "$GITHUB_STEP_SUMMARY"

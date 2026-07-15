@@ -1,10 +1,95 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >-
-  Permanent cleanup mechanism. EventBridge Scheduler starts a Step Functions
-  workflow which deletes service runtime stacks and then the preview platform.
+  Permanent EventBridge Scheduler cleanup mechanism for food-delivery preview
+  stacks. CloudFormation deletes stack resources through a dedicated service
+  role instead of using the Lambda execution role.
 
 Resources:
+  CloudFormationCleanupExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: food-delivery-cloudformation-cleanup-role
+      Description: CloudFormation service role for deleting temporary food-delivery stacks
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CloudFormationAssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: DeleteTemporaryFoodDeliveryResources
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DeleteEcsResources
+                Effect: Allow
+                Action:
+                  - ecs:DescribeClusters
+                  - ecs:DeleteCluster
+                  - ecs:ListServices
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                  - ecs:DeleteService
+                  - ecs:ListTasks
+                  - ecs:DescribeTasks
+                  - ecs:StopTask
+                  - ecs:ListTagsForResource
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                Resource: "*"
+
+              - Sid: DeleteLoadBalancingResources
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeLoadBalancerAttributes
+                  - elasticloadbalancing:DeleteLoadBalancer
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:DeleteListener
+                  - elasticloadbalancing:DescribeRules
+                  - elasticloadbalancing:DeleteRule
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeTargetGroupAttributes
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:DeregisterTargets
+                  - elasticloadbalancing:DeleteTargetGroup
+                  - elasticloadbalancing:DescribeTags
+                  - elasticloadbalancing:RemoveTags
+                Resource: "*"
+
+              - Sid: DeleteSecurityGroups
+                Effect: Allow
+                Action:
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSecurityGroupRules
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeVpcs
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:DeleteSecurityGroup
+                  - ec2:DeleteTags
+                Resource: "*"
+
+              - Sid: DeleteApiGatewayRoutesAndIntegration
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                  - apigateway:DELETE
+                Resource: "*"
+
+              - Sid: DeleteSchedulerSchedule
+                Effect: Allow
+                Action:
+                  - scheduler:GetSchedule
+                  - scheduler:DeleteSchedule
+                  - scheduler:UntagResource
+                Resource: "*"
+
   CleanupFunctionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -12,7 +97,8 @@ Resources:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Effect: Allow
+          - Sid: LambdaAssumeRole
+            Effect: Allow
             Principal:
               Service:
                 - lambda.amazonaws.com
@@ -21,11 +107,12 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: DeletePreviewStacks
+        - PolicyName: ManagePreviewStacks
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Effect: Allow
+              - Sid: DescribeAndDeleteExpectedStacks
+                Effect: Allow
                 Action:
                   - cloudformation:DescribeStacks
                   - cloudformation:DeleteStack
@@ -34,27 +121,45 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/restaurant-service-runtime/*"
                   - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/food-delivery-preview-platform/*"
 
+              - Sid: PassCloudFormationCleanupRole
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt CloudFormationCleanupExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+
   CleanupFunction:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: food-delivery-preview-stack-cleanup
+      Description: Starts and checks deletion of approved CloudFormation stacks
       Runtime: python3.12
       Handler: index.handler
       Role: !GetAtt CleanupFunctionRole.Arn
       Timeout: 30
       MemorySize: 128
+      Environment:
+        Variables:
+          CLOUDFORMATION_ROLE_ARN: !GetAtt CloudFormationCleanupExecutionRole.Arn
       Code:
         ZipFile: |
+          import os
+
           import boto3
           from botocore.exceptions import ClientError
 
-          cloudformation = boto3.client("cloudformation")
 
-          ALLOWED_STACKS = {
+          cloudformation = boto3.client("cloudformation")
+          cloudformation_role_arn = os.environ["CLOUDFORMATION_ROLE_ARN"]
+
+          allowed_stacks = {
               "order-service-runtime",
               "restaurant-service-runtime",
               "food-delivery-preview-platform",
           }
+
 
           def find_stack(stack_name):
               try:
@@ -64,34 +169,58 @@ Resources:
                   error = exc.response.get("Error", {})
                   code = error.get("Code", "")
                   message = error.get("Message", "")
+
                   if code == "ValidationError" and "does not exist" in message:
                       return None
+
                   raise
+
+
+          def start_deletion(stack_name):
+              # Passing RoleARN is critical. CloudFormation, not the Lambda role,
+              # uses this role to call ECS, ELB, EC2, API Gateway, and Scheduler.
+              cloudformation.delete_stack(
+                  StackName=stack_name,
+                  RoleARN=cloudformation_role_arn,
+              )
+
 
           def handler(event, context):
               action = event.get("action")
               stack_name = event.get("stackName")
 
-              if stack_name not in ALLOWED_STACKS:
-                  raise ValueError(f"Refusing to manage unexpected stack: {stack_name}")
+              if stack_name not in allowed_stacks:
+                  raise ValueError(
+                      f"Refusing to manage unexpected stack: {stack_name}"
+                  )
 
               stack = find_stack(stack_name)
 
               if stack is None:
-                  return {"status": "DELETED", "stackName": stack_name}
+                  return {
+                      "status": "DELETED",
+                      "stackName": stack_name,
+                  }
 
               status = stack["StackStatus"]
 
-              if status == "DELETE_FAILED":
-                  raise RuntimeError(f"{stack_name} is in DELETE_FAILED")
-
               if action == "delete":
+                  # A stack in DELETE_FAILED can be deleted again. The previous
+                  # version raised an exception here and prevented recovery.
                   if status != "DELETE_IN_PROGRESS":
-                      cloudformation.delete_stack(StackName=stack_name)
-                  return {"status": "DELETE_IN_PROGRESS", "stackName": stack_name}
+                      start_deletion(stack_name)
+
+                  return {
+                      "status": "DELETE_IN_PROGRESS",
+                      "previousStatus": status,
+                      "stackName": stack_name,
+                  }
 
               if action == "status":
-                  return {"status": status, "stackName": stack_name}
+                  return {
+                      "status": status,
+                      "stackName": stack_name,
+                  }
 
               raise ValueError(f"Unknown action: {action}")
 
@@ -102,7 +231,8 @@ Resources:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Effect: Allow
+          - Sid: StepFunctionsAssumeRole
+            Effect: Allow
             Principal:
               Service:
                 - states.amazonaws.com
@@ -128,7 +258,7 @@ Resources:
         Fn::Sub:
           - |
             {
-              "Comment": "Delete service runtimes and then the shared preview platform",
+              "Comment": "Delete service runtime stacks and then the temporary shared platform",
               "StartAt": "DeleteOrderRuntime",
               "States": {
                 "DeleteOrderRuntime": {
@@ -136,86 +266,180 @@ Resources:
                   "Resource": "arn:${Partition}:states:::lambda:invoke",
                   "Parameters": {
                     "FunctionName": "${CleanupFunctionArn}",
-                    "Payload": {"action": "delete", "stackName": "order-service-runtime"}
+                    "Payload": {
+                      "action": "delete",
+                      "stackName": "order-service-runtime"
+                    }
                   },
-                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultSelector": {
+                    "status.$": "$.Payload.status"
+                  },
                   "ResultPath": "$.order",
                   "Next": "WaitOrderRuntime"
                 },
-                "WaitOrderRuntime": {"Type": "Wait", "Seconds": 20, "Next": "CheckOrderRuntime"},
+                "WaitOrderRuntime": {
+                  "Type": "Wait",
+                  "Seconds": 20,
+                  "Next": "CheckOrderRuntime"
+                },
                 "CheckOrderRuntime": {
                   "Type": "Task",
                   "Resource": "arn:${Partition}:states:::lambda:invoke",
                   "Parameters": {
                     "FunctionName": "${CleanupFunctionArn}",
-                    "Payload": {"action": "status", "stackName": "order-service-runtime"}
+                    "Payload": {
+                      "action": "status",
+                      "stackName": "order-service-runtime"
+                    }
                   },
-                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultSelector": {
+                    "status.$": "$.Payload.status"
+                  },
                   "ResultPath": "$.order",
-                  "Next": "IsOrderRuntimeDeleted"
+                  "Next": "OrderRuntimeStatus"
                 },
-                "IsOrderRuntimeDeleted": {
+                "OrderRuntimeStatus": {
                   "Type": "Choice",
-                  "Choices": [{"Variable": "$.order.status", "StringEquals": "DELETED", "Next": "DeleteRestaurantRuntime"}],
+                  "Choices": [
+                    {
+                      "Variable": "$.order.status",
+                      "StringEquals": "DELETED",
+                      "Next": "DeleteRestaurantRuntime"
+                    },
+                    {
+                      "Variable": "$.order.status",
+                      "StringEquals": "DELETE_FAILED",
+                      "Next": "RetryOrderRuntimeDeletion"
+                    }
+                  ],
                   "Default": "WaitOrderRuntime"
                 },
+                "RetryOrderRuntimeDeletion": {
+                  "Type": "Wait",
+                  "Seconds": 30,
+                  "Next": "DeleteOrderRuntime"
+                },
+
                 "DeleteRestaurantRuntime": {
                   "Type": "Task",
                   "Resource": "arn:${Partition}:states:::lambda:invoke",
                   "Parameters": {
                     "FunctionName": "${CleanupFunctionArn}",
-                    "Payload": {"action": "delete", "stackName": "restaurant-service-runtime"}
+                    "Payload": {
+                      "action": "delete",
+                      "stackName": "restaurant-service-runtime"
+                    }
                   },
-                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultSelector": {
+                    "status.$": "$.Payload.status"
+                  },
                   "ResultPath": "$.restaurant",
                   "Next": "WaitRestaurantRuntime"
                 },
-                "WaitRestaurantRuntime": {"Type": "Wait", "Seconds": 20, "Next": "CheckRestaurantRuntime"},
+                "WaitRestaurantRuntime": {
+                  "Type": "Wait",
+                  "Seconds": 20,
+                  "Next": "CheckRestaurantRuntime"
+                },
                 "CheckRestaurantRuntime": {
                   "Type": "Task",
                   "Resource": "arn:${Partition}:states:::lambda:invoke",
                   "Parameters": {
                     "FunctionName": "${CleanupFunctionArn}",
-                    "Payload": {"action": "status", "stackName": "restaurant-service-runtime"}
+                    "Payload": {
+                      "action": "status",
+                      "stackName": "restaurant-service-runtime"
+                    }
                   },
-                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultSelector": {
+                    "status.$": "$.Payload.status"
+                  },
                   "ResultPath": "$.restaurant",
-                  "Next": "IsRestaurantRuntimeDeleted"
+                  "Next": "RestaurantRuntimeStatus"
                 },
-                "IsRestaurantRuntimeDeleted": {
+                "RestaurantRuntimeStatus": {
                   "Type": "Choice",
-                  "Choices": [{"Variable": "$.restaurant.status", "StringEquals": "DELETED", "Next": "DeletePreviewPlatform"}],
+                  "Choices": [
+                    {
+                      "Variable": "$.restaurant.status",
+                      "StringEquals": "DELETED",
+                      "Next": "DeletePreviewPlatform"
+                    },
+                    {
+                      "Variable": "$.restaurant.status",
+                      "StringEquals": "DELETE_FAILED",
+                      "Next": "RetryRestaurantRuntimeDeletion"
+                    }
+                  ],
                   "Default": "WaitRestaurantRuntime"
                 },
+                "RetryRestaurantRuntimeDeletion": {
+                  "Type": "Wait",
+                  "Seconds": 30,
+                  "Next": "DeleteRestaurantRuntime"
+                },
+
                 "DeletePreviewPlatform": {
                   "Type": "Task",
                   "Resource": "arn:${Partition}:states:::lambda:invoke",
                   "Parameters": {
                     "FunctionName": "${CleanupFunctionArn}",
-                    "Payload": {"action": "delete", "stackName": "food-delivery-preview-platform"}
+                    "Payload": {
+                      "action": "delete",
+                      "stackName": "food-delivery-preview-platform"
+                    }
                   },
-                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultSelector": {
+                    "status.$": "$.Payload.status"
+                  },
                   "ResultPath": "$.platform",
                   "Next": "WaitPreviewPlatform"
                 },
-                "WaitPreviewPlatform": {"Type": "Wait", "Seconds": 20, "Next": "CheckPreviewPlatform"},
+                "WaitPreviewPlatform": {
+                  "Type": "Wait",
+                  "Seconds": 20,
+                  "Next": "CheckPreviewPlatform"
+                },
                 "CheckPreviewPlatform": {
                   "Type": "Task",
                   "Resource": "arn:${Partition}:states:::lambda:invoke",
                   "Parameters": {
                     "FunctionName": "${CleanupFunctionArn}",
-                    "Payload": {"action": "status", "stackName": "food-delivery-preview-platform"}
+                    "Payload": {
+                      "action": "status",
+                      "stackName": "food-delivery-preview-platform"
+                    }
                   },
-                  "ResultSelector": {"status.$": "$.Payload.status"},
+                  "ResultSelector": {
+                    "status.$": "$.Payload.status"
+                  },
                   "ResultPath": "$.platform",
-                  "Next": "IsPreviewPlatformDeleted"
+                  "Next": "PreviewPlatformStatus"
                 },
-                "IsPreviewPlatformDeleted": {
+                "PreviewPlatformStatus": {
                   "Type": "Choice",
-                  "Choices": [{"Variable": "$.platform.status", "StringEquals": "DELETED", "Next": "CleanupComplete"}],
+                  "Choices": [
+                    {
+                      "Variable": "$.platform.status",
+                      "StringEquals": "DELETED",
+                      "Next": "CleanupComplete"
+                    },
+                    {
+                      "Variable": "$.platform.status",
+                      "StringEquals": "DELETE_FAILED",
+                      "Next": "RetryPreviewPlatformDeletion"
+                    }
+                  ],
                   "Default": "WaitPreviewPlatform"
                 },
-                "CleanupComplete": {"Type": "Succeed"}
+                "RetryPreviewPlatformDeletion": {
+                  "Type": "Wait",
+                  "Seconds": 30,
+                  "Next": "DeletePreviewPlatform"
+                },
+                "CleanupComplete": {
+                  "Type": "Succeed"
+                }
               }
             }
           - Partition: !Ref AWS::Partition
@@ -228,7 +452,8 @@ Resources:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Effect: Allow
+          - Sid: SchedulerAssumeRole
+            Effect: Allow
             Principal:
               Service:
                 - scheduler.amazonaws.com
@@ -254,3 +479,9 @@ Outputs:
     Value: !GetAtt SchedulerExecutionRole.Arn
     Export:
       Name: food-delivery-cleanup-scheduler-role-arn
+
+  CloudFormationExecutionRoleArn:
+    Description: Service role used by CloudFormation while deleting temporary stacks
+    Value: !GetAtt CloudFormationCleanupExecutionRole.Arn
+    Export:
+      Name: food-delivery-cloudformation-cleanup-role-arn

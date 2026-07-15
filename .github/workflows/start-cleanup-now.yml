@@ -22,8 +22,30 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           role-session-name: manual-cleanup-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
 
-      - name: Start permanent cleanup state machine
+      - name: Verify cleanup stack is ready
+        run: |
+          set -euo pipefail
+
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$CLEANUP_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].StackStatus" \
+            --output text)
+
+          case "$STATUS" in
+            CREATE_COMPLETE|UPDATE_COMPLETE)
+              echo "Cleanup stack is ready: $STATUS"
+              ;;
+            *)
+              echo "::error::Cleanup stack is not ready. Current status: $STATUS"
+              exit 1
+              ;;
+          esac
+
+      - name: Start a new Step Functions cleanup execution
+        id: start
         run: |
           set -euo pipefail
 
@@ -33,7 +55,24 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='CleanupStateMachineArn'].OutputValue" \
             --output text)
 
-          aws stepfunctions start-execution \
+          EXECUTION_NAME="manual-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          EXECUTION_ARN=$(aws stepfunctions start-execution \
             --state-machine-arn "$STATE_MACHINE_ARN" \
+            --name "$EXECUTION_NAME" \
             --input '{}' \
-            --region "$AWS_REGION"
+            --region "$AWS_REGION" \
+            --query executionArn \
+            --output text)
+
+          echo "execution-arn=$EXECUTION_ARN" >> "$GITHUB_OUTPUT"
+          echo "Started $EXECUTION_ARN"
+
+      - name: Show execution
+        run: |
+          {
+            echo "## Cleanup started in AWS"
+            echo
+            echo "- Execution: \`${{ steps.start.outputs.execution-arn }}\`"
+            echo "- GitHub Actions can finish; Step Functions continues in AWS."
+          } >> "$GITHUB_STEP_SUMMARY"
