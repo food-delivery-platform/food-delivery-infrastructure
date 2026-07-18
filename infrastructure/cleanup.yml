@@ -30,7 +30,9 @@ Resources:
                 Effect: Allow
                 Action:
                   - ecs:DescribeClusters
+                  - ecs:DescribeTaskDefinition
                   - ecs:DeleteCluster
+                  - ecs:DeregisterTaskDefinition
                   - ecs:ListServices
                   - ecs:DescribeServices
                   - ecs:UpdateService
