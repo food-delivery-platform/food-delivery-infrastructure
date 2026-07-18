@@ -213,6 +213,9 @@ Resources:
           PortMappings:
             - ContainerPort: !Ref RestaurantServiceContainerPort
               Protocol: tcp
+          Environment:
+            - Name: PORT
+              Value: !Ref RestaurantServiceContainerPort
           LogConfiguration:
             LogDriver: awslogs
             Options:
