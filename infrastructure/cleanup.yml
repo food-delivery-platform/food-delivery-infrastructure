@@ -115,6 +115,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
                   - cloudformation:DeleteStack
                 Resource:
                   - !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/delivery-service-runtime/*"
@@ -176,6 +177,26 @@ Resources:
                   raise
 
 
+          def get_failure_reason(stack_name):
+              try:
+                  response = cloudformation.describe_stack_events(
+                      StackName=stack_name
+                  )
+              except ClientError:
+                  return "Stack deletion failed. Check CloudFormation stack events for details."
+
+              for event in response.get("StackEvents", []):
+                  status = event.get("ResourceStatus")
+                  reason = event.get("ResourceStatusReason")
+
+                  if status and status.endswith("_FAILED") and reason:
+                      logical_id = event.get("LogicalResourceId", "unknown resource")
+                      resource_type = event.get("ResourceType", "unknown type")
+                      return f"{logical_id} ({resource_type}): {reason}"
+
+              return "Stack deletion failed. No failed resource event was found."
+
+
           def start_deletion(stack_name):
               # Passing RoleARN is critical. CloudFormation, not the Lambda role,
               # uses this role to call ECS, ELB, EC2, API Gateway, and Scheduler.
@@ -200,13 +221,31 @@ Resources:
                   return {
                       "status": "DELETED",
                       "stackName": stack_name,
+                      "failureReason": "",
                   }
 
               status = stack["StackStatus"]
 
+              if status == "DELETE_COMPLETE":
+                  return {
+                      "status": "DELETED",
+                      "stackName": stack_name,
+                      "failureReason": "",
+                  }
+
+              result = {
+                  "status": status,
+                  "stackName": stack_name,
+                  "failureReason": "",
+              }
+
+              if status == "DELETE_FAILED":
+                  result["failureReason"] = get_failure_reason(stack_name)
+
               if action == "delete":
-                  # A stack in DELETE_FAILED can be deleted again. The previous
-                  # version raised an exception here and prevented recovery.
+                  if status == "DELETE_FAILED":
+                      return result
+
                   if status != "DELETE_IN_PROGRESS":
                       start_deletion(stack_name)
 
@@ -214,13 +253,11 @@ Resources:
                       "status": "DELETE_IN_PROGRESS",
                       "previousStatus": status,
                       "stackName": stack_name,
+                      "failureReason": "",
                   }
 
               if action == "status":
-                  return {
-                      "status": status,
-                      "stackName": stack_name,
-                  }
+                  return result
 
               raise ValueError(f"Unknown action: {action}")
 
@@ -272,10 +309,11 @@ Resources:
                     }
                   },
                   "ResultSelector": {
-                    "status.$": "$.Payload.status"
+                    "status.$": "$.Payload.status",
+                    "failureReason.$": "$.Payload.failureReason"
                   },
                   "ResultPath": "$.delivery",
-                  "Next": "WaitDeliveryRuntime"
+                  "Next": "DeliveryRuntimeStatus"
                 },
                 "WaitDeliveryRuntime": {
                   "Type": "Wait",
@@ -293,7 +331,8 @@ Resources:
                     }
                   },
                   "ResultSelector": {
-                    "status.$": "$.Payload.status"
+                    "status.$": "$.Payload.status",
+                    "failureReason.$": "$.Payload.failureReason"
                   },
                   "ResultPath": "$.delivery",
                   "Next": "DeliveryRuntimeStatus"
@@ -309,15 +348,15 @@ Resources:
                     {
                       "Variable": "$.delivery.status",
                       "StringEquals": "DELETE_FAILED",
-                      "Next": "RetryDeliveryRuntimeDeletion"
+                      "Next": "DeliveryRuntimeDeletionFailed"
                     }
                   ],
                   "Default": "WaitDeliveryRuntime"
                 },
-                "RetryDeliveryRuntimeDeletion": {
-                  "Type": "Wait",
-                  "Seconds": 30,
-                  "Next": "DeleteDeliveryRuntime"
+                "DeliveryRuntimeDeletionFailed": {
+                  "Type": "Fail",
+                  "Error": "DeliveryRuntimeDeletionFailed",
+                  "CausePath": "$.delivery.failureReason"
                 },
 
                 "DeleteRestaurantRuntime": {
@@ -331,10 +370,11 @@ Resources:
                     }
                   },
                   "ResultSelector": {
-                    "status.$": "$.Payload.status"
+                    "status.$": "$.Payload.status",
+                    "failureReason.$": "$.Payload.failureReason"
                   },
                   "ResultPath": "$.restaurant",
-                  "Next": "WaitRestaurantRuntime"
+                  "Next": "RestaurantRuntimeStatus"
                 },
                 "WaitRestaurantRuntime": {
                   "Type": "Wait",
@@ -352,7 +392,8 @@ Resources:
                     }
                   },
                   "ResultSelector": {
-                    "status.$": "$.Payload.status"
+                    "status.$": "$.Payload.status",
+                    "failureReason.$": "$.Payload.failureReason"
                   },
                   "ResultPath": "$.restaurant",
                   "Next": "RestaurantRuntimeStatus"
@@ -368,15 +409,15 @@ Resources:
                     {
                       "Variable": "$.restaurant.status",
                       "StringEquals": "DELETE_FAILED",
-                      "Next": "RetryRestaurantRuntimeDeletion"
+                      "Next": "RestaurantRuntimeDeletionFailed"
                     }
                   ],
                   "Default": "WaitRestaurantRuntime"
                 },
-                "RetryRestaurantRuntimeDeletion": {
-                  "Type": "Wait",
-                  "Seconds": 30,
-                  "Next": "DeleteRestaurantRuntime"
+                "RestaurantRuntimeDeletionFailed": {
+                  "Type": "Fail",
+                  "Error": "RestaurantRuntimeDeletionFailed",
+                  "CausePath": "$.restaurant.failureReason"
                 },
 
                 "DeletePreviewPlatform": {
@@ -390,10 +431,11 @@ Resources:
                     }
                   },
                   "ResultSelector": {
-                    "status.$": "$.Payload.status"
+                    "status.$": "$.Payload.status",
+                    "failureReason.$": "$.Payload.failureReason"
                   },
                   "ResultPath": "$.platform",
-                  "Next": "WaitPreviewPlatform"
+                  "Next": "PreviewPlatformStatus"
                 },
                 "WaitPreviewPlatform": {
                   "Type": "Wait",
@@ -411,7 +453,8 @@ Resources:
                     }
                   },
                   "ResultSelector": {
-                    "status.$": "$.Payload.status"
+                    "status.$": "$.Payload.status",
+                    "failureReason.$": "$.Payload.failureReason"
                   },
                   "ResultPath": "$.platform",
                   "Next": "PreviewPlatformStatus"
@@ -427,15 +470,15 @@ Resources:
                     {
                       "Variable": "$.platform.status",
                       "StringEquals": "DELETE_FAILED",
-                      "Next": "RetryPreviewPlatformDeletion"
+                      "Next": "PreviewPlatformDeletionFailed"
                     }
                   ],
                   "Default": "WaitPreviewPlatform"
                 },
-                "RetryPreviewPlatformDeletion": {
-                  "Type": "Wait",
-                  "Seconds": 30,
-                  "Next": "DeletePreviewPlatform"
+                "PreviewPlatformDeletionFailed": {
+                  "Type": "Fail",
+                  "Error": "PreviewPlatformDeletionFailed",
+                  "CausePath": "$.platform.failureReason"
                 },
                 "CleanupComplete": {
                   "Type": "Succeed"
