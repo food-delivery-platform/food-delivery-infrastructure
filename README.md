@@ -22,6 +22,11 @@ delivery-service-runtime
 Deleting `delivery-service-runtime` and `restaurant-service-runtime` removes
 their ECS Services and stops their Fargate tasks.
 
+The preview platform creates a Fargate-ready ECS cluster, but it does not create
+the running service tasks. Fargate tasks do not appear as EC2 container
+instances in the ECS cluster; the service runtime stacks create the ECS
+Services and tasks.
+
 Deleting `food-delivery-preview-platform` removes:
 
 - ECS cluster
@@ -52,6 +57,8 @@ The delivery-service repository should read:
 - `DeliveryTargetGroupArn`
 - `DeliveryTaskSecurityGroupId`
 - `SubnetIds`
+- `AssignPublicIp` (`ENABLED`, because the exported subnets are public)
+- `DefaultCapacityProvider` (`FARGATE`)
 
 Its temporary stack must be named:
 
@@ -67,6 +74,8 @@ The restaurant-service repository should read:
 - `RestaurantTargetGroupArn`
 - `RestaurantTaskSecurityGroupId`
 - `SubnetIds`
+- `AssignPublicIp` (`ENABLED`, because the exported subnets are public)
+- `DefaultCapacityProvider` (`FARGATE`)
 
 Its temporary stack must be named:
 

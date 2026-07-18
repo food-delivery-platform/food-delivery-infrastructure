@@ -35,6 +35,7 @@ Resources:
                   - ecs:DeregisterTaskDefinition
                   - ecs:ListServices
                   - ecs:DescribeServices
+                  - ecs:PutClusterCapacityProviders
                   - ecs:UpdateService
                   - ecs:DeleteService
                   - ecs:ListTasks

@@ -66,6 +66,17 @@ Resources:
         - Key: Lifetime
           Value: temporary
 
+  PreviewClusterCapacityProviders:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      Cluster: !Ref PreviewCluster
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -414,6 +425,13 @@ Outputs:
   SubnetIds:
     Value:
       Fn::ImportValue: food-delivery-network-public-subnet-ids
+
+  AssignPublicIp:
+    Description: Runtime ECS services must assign public IPs when using the exported public subnets.
+    Value: ENABLED
+
+  DefaultCapacityProvider:
+    Value: FARGATE
 
   ApiEndpoint:
     Value:

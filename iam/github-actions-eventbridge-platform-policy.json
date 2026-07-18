@@ -38,6 +38,7 @@
         "ecs:CreateCluster",
         "ecs:DeleteCluster",
         "ecs:DescribeClusters",
+        "ecs:PutClusterCapacityProviders",
         "ecs:TagResource",
         "ecs:UntagResource",
         "elasticloadbalancing:*",
