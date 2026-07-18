@@ -92,6 +92,31 @@ Resources:
                   - scheduler:UntagResource
                 Resource: "*"
 
+              - Sid: DeleteRuntimeLogGroups
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:DeleteLogGroup
+                  - logs:ListTagsForResource
+                  - logs:UntagResource
+                Resource: "*"
+
+              - Sid: DeleteRuntimeIamRoles
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:DeleteRole
+                  - iam:ListRolePolicies
+                  - iam:GetRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:DetachRolePolicy
+                  - iam:ListInstanceProfilesForRole
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:ListRoleTags
+                  - iam:UntagRole
+                Resource: "*"
+
   CleanupFunctionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -187,16 +212,26 @@ Resources:
               except ClientError:
                   return "Stack deletion failed. Check CloudFormation stack events for details."
 
+              fallback_reason = None
+
               for event in response.get("StackEvents", []):
                   status = event.get("ResourceStatus")
                   reason = event.get("ResourceStatusReason")
 
-                  if status and status.endswith("_FAILED") and reason:
-                      logical_id = event.get("LogicalResourceId", "unknown resource")
-                      resource_type = event.get("ResourceType", "unknown type")
-                      return f"{logical_id} ({resource_type}): {reason}"
+                  if not status or not status.endswith("_FAILED") or not reason:
+                      continue
 
-              return "Stack deletion failed. No failed resource event was found."
+                  logical_id = event.get("LogicalResourceId", "unknown resource")
+                  resource_type = event.get("ResourceType", "unknown type")
+                  formatted_reason = f"{logical_id} ({resource_type}): {reason}"
+
+                  if resource_type != "AWS::CloudFormation::Stack":
+                      return formatted_reason
+
+                  if fallback_reason is None:
+                      fallback_reason = formatted_reason
+
+              return fallback_reason or "Stack deletion failed. No failed resource event was found."
 
 
           def start_deletion(stack_name):
@@ -245,9 +280,6 @@ Resources:
                   result["failureReason"] = get_failure_reason(stack_name)
 
               if action == "delete":
-                  if status == "DELETE_FAILED":
-                      return result
-
                   if status != "DELETE_IN_PROGRESS":
                       start_deletion(stack_name)
 
