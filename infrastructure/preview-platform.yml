@@ -46,9 +46,23 @@ Parameters:
     Default: "/api/menu-items"
     Description: Restaurant service menu items API base path without a trailing slash.
 
+  RestaurantServiceImageUri:
+    Type: String
+    Default: ""
+    Description: Full restaurant-service container image URI, such as account.dkr.ecr.region.amazonaws.com/repository:tag. Leave empty to skip creating the runtime service.
+
+  RestaurantServiceDesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 10
+
   CleanupScheduleExpression:
     Type: String
     Description: One-time expression such as at(2026-07-15T18:30:00).
+
+Conditions:
+  CreateRestaurantService: !Not [!Equals [!Ref RestaurantServiceImageUri, ""]]
 
 Resources:
   PreviewCluster:
@@ -143,6 +157,69 @@ Resources:
       Tags:
         - Key: Name
           Value: food-delivery-restaurant-task-sg
+        - Key: Service
+          Value: restaurant-service
+        - Key: Lifetime
+          Value: temporary
+
+  RestaurantLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: CreateRestaurantService
+    Properties:
+      LogGroupName: /aws/ecs/food-delivery/restaurant-service-preview
+      RetentionInDays: 7
+      Tags:
+        - Key: Service
+          Value: restaurant-service
+        - Key: Lifetime
+          Value: temporary
+
+  RestaurantTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: CreateRestaurantService
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags:
+        - Key: Service
+          Value: restaurant-service
+        - Key: Lifetime
+          Value: temporary
+
+  RestaurantTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Condition: CreateRestaurantService
+    Properties:
+      Family: food-delivery-restaurant-preview
+      Cpu: "512"
+      Memory: "1024"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt RestaurantTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: restaurant-service
+          Image: !Ref RestaurantServiceImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref RestaurantServiceContainerPort
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref RestaurantLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: restaurant
+      Tags:
         - Key: Service
           Value: restaurant-service
         - Key: Lifetime
@@ -386,6 +463,44 @@ Resources:
       AuthorizationType: NONE
       Target: !Join ["/", ["integrations", !Ref PrivateAlbIntegration]]
 
+  RestaurantService:
+    Type: AWS::ECS::Service
+    Condition: CreateRestaurantService
+    DependsOn:
+      - PreviewClusterCapacityProviders
+      - RestaurantListenerRule
+      - RestaurantCategoryListenerRule
+      - RestaurantMenuItemListenerRule
+    Properties:
+      ServiceName: restaurant-service-preview
+      Cluster: !Ref PreviewCluster
+      DesiredCount: !Ref RestaurantServiceDesiredCount
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+      HealthCheckGracePeriodSeconds: 60
+      LoadBalancers:
+        - ContainerName: restaurant-service
+          ContainerPort: !Ref RestaurantServiceContainerPort
+          TargetGroupArn: !Ref RestaurantTargetGroup
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref RestaurantTaskSecurityGroup
+          Subnets:
+            - Fn::ImportValue: food-delivery-network-public-subnet-a-id
+            - Fn::ImportValue: food-delivery-network-public-subnet-b-id
+      TaskDefinition: !Ref RestaurantTaskDefinition
+      Tags:
+        - Key: Service
+          Value: restaurant-service
+        - Key: Lifetime
+          Value: temporary
+
   PreviewCleanupSchedule:
     Type: AWS::Scheduler::Schedule
     Properties:
@@ -432,6 +547,14 @@ Outputs:
 
   DefaultCapacityProvider:
     Value: FARGATE
+
+  RestaurantServiceName:
+    Condition: CreateRestaurantService
+    Value: restaurant-service-preview
+
+  RestaurantTaskDefinitionArn:
+    Condition: CreateRestaurantService
+    Value: !Ref RestaurantTaskDefinition
 
   ApiEndpoint:
     Value:

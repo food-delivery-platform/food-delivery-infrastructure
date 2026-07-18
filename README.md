@@ -20,12 +20,13 @@ delivery-service-runtime
 ```
 
 Deleting `delivery-service-runtime` and `restaurant-service-runtime` removes
-their ECS Services and stops their Fargate tasks.
+any ECS Services and Fargate tasks created by those runtime stacks.
 
-The preview platform creates a Fargate-ready ECS cluster, but it does not create
-the running service tasks. Fargate tasks do not appear as EC2 container
-instances in the ECS cluster; the service runtime stacks create the ECS
-Services and tasks.
+The preview platform creates a Fargate-ready ECS cluster. Fargate tasks do not
+appear as EC2 container instances in the ECS cluster. If the GitHub secret
+`RESTAURANT_SERVICE_IMAGE_URI` is set to a full ECR image URI, the platform also
+creates the restaurant-service task definition, ECS Service, and one running
+Fargate task.
 
 Deleting `food-delivery-preview-platform` removes:
 
@@ -35,6 +36,8 @@ Deleting `food-delivery-preview-platform` removes:
 - delivery and restaurant target groups
 - temporary security groups
 - temporary API Gateway routes and private integration
+- optional restaurant-service ECS Service, task definition, task execution role,
+  and log group
 - the one-time EventBridge Scheduler schedule
 
 The cleanup does not remove:
@@ -66,9 +69,21 @@ Its temporary stack must be named:
 delivery-service-runtime
 ```
 
-## Restaurant service workflow outputs
+## Restaurant service image
 
-The restaurant-service repository should read:
+To run restaurant-service as part of the platform deployment, set the GitHub
+secret `RESTAURANT_SERVICE_IMAGE_URI` to the full image URI:
+
+```text
+123456789012.dkr.ecr.us-east-1.amazonaws.com/restaurant-service:latest
+```
+
+Use the image URI, not the ECR repository ARN. The repository ARN identifies the
+repository, but ECS task definitions need a pullable image reference including a
+tag or digest.
+
+The platform still exports these values if restaurant-service is deployed by a
+separate runtime stack:
 
 - `ClusterName`
 - `RestaurantTargetGroupArn`
@@ -76,9 +91,3 @@ The restaurant-service repository should read:
 - `SubnetIds`
 - `AssignPublicIp` (`ENABLED`, because the exported subnets are public)
 - `DefaultCapacityProvider` (`FARGATE`)
-
-Its temporary stack must be named:
-
-```text
-restaurant-service-runtime
-```

@@ -93,6 +93,7 @@ jobs:
           RESTAURANT_HEALTH_PATH: ${{ inputs.restaurant_health_check_path }}
           DELIVERY_BASE_PATH: ${{ inputs.delivery_base_path }}
           RESTAURANT_BASE_PATH: ${{ inputs.restaurant_base_path }}
+          RESTAURANT_SERVICE_IMAGE_URI: ${{ secrets.RESTAURANT_SERVICE_IMAGE_URI }}
         run: |
           set -euo pipefail
 
@@ -128,6 +129,18 @@ jobs:
           if [[ "$DELIVERY_BASE_PATH" == */ || "$RESTAURANT_BASE_PATH" == */ ]]; then
             echo "::error::Service base paths must not end with /"
             exit 1
+          fi
+
+          if [[ -n "$RESTAURANT_SERVICE_IMAGE_URI" ]]; then
+            if [[ "$RESTAURANT_SERVICE_IMAGE_URI" == arn:* ]]; then
+              echo "::error::RESTAURANT_SERVICE_IMAGE_URI must be a container image URI, not an ECR ARN"
+              exit 1
+            fi
+
+            if [[ "$RESTAURANT_SERVICE_IMAGE_URI" != *".dkr.ecr."*".amazonaws.com/"* ]]; then
+              echo "::error::RESTAURANT_SERVICE_IMAGE_URI must look like an ECR image URI"
+              exit 1
+            fi
           fi
 
       - name: Validate CloudFormation templates
@@ -229,6 +242,7 @@ jobs:
             --stack-name "$PLATFORM_STACK_NAME" \
             --template-file infrastructure/preview-platform.yml \
             --region "$AWS_REGION" \
+            --capabilities CAPABILITY_IAM \
             --no-fail-on-empty-changeset \
             --parameter-overrides \
               DeliveryServiceContainerPort="${{ inputs.delivery_container_port }}" \
@@ -237,9 +251,12 @@ jobs:
               RestaurantServiceHealthCheckPath="${{ inputs.restaurant_health_check_path }}" \
               DeliveryServiceBasePath="${{ inputs.delivery_base_path }}" \
               RestaurantServiceBasePath="${{ inputs.restaurant_base_path }}" \
+              RestaurantServiceImageUri="${{ secrets.RESTAURANT_SERVICE_IMAGE_URI }}" \
               CleanupScheduleExpression="${{ steps.lifetime.outputs.schedule-expression }}"
 
       - name: Show deployment summary
+        env:
+          RESTAURANT_SERVICE_IMAGE_URI: ${{ secrets.RESTAURANT_SERVICE_IMAGE_URI }}
         run: |
           set -euo pipefail
 
@@ -255,6 +272,11 @@ jobs:
             echo "- API endpoint: ${API_ENDPOINT}"
             echo "- Delivery: ${API_ENDPOINT}${{ inputs.delivery_base_path }}"
             echo "- Restaurants: ${API_ENDPOINT}${{ inputs.restaurant_base_path }}"
+            if [[ -n "$RESTAURANT_SERVICE_IMAGE_URI" ]]; then
+              echo "- Restaurant ECS service: enabled"
+            else
+              echo "- Restaurant ECS service: skipped (missing RESTAURANT_SERVICE_IMAGE_URI secret)"
+            fi
             echo "- Lifetime: ${{ inputs.lifetime_minutes }} minutes"
             echo "- Scheduled AWS cleanup: ${{ steps.lifetime.outputs.delete-at }}"
             echo
