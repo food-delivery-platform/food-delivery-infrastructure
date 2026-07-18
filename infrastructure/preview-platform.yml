@@ -36,6 +36,16 @@ Parameters:
     Default: "/api/restaurants"
     Description: API base path without a trailing slash.
 
+  RestaurantCategoryBasePath:
+    Type: String
+    Default: "/api/categories"
+    Description: Restaurant service categories API base path without a trailing slash.
+
+  RestaurantMenuItemBasePath:
+    Type: String
+    Default: "/api/menu-items"
+    Description: Restaurant service menu items API base path without a trailing slash.
+
   CleanupScheduleExpression:
     Type: String
     Description: One-time expression such as at(2026-07-15T18:30:00).
@@ -246,6 +256,36 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref RestaurantTargetGroup
 
+  RestaurantCategoryListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 21
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - !Ref RestaurantCategoryBasePath
+              - !Sub "${RestaurantCategoryBasePath}/*"
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref RestaurantTargetGroup
+
+  RestaurantMenuItemListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 22
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - !Ref RestaurantMenuItemBasePath
+              - !Sub "${RestaurantMenuItemBasePath}/*"
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref RestaurantTargetGroup
+
   PrivateAlbIntegration:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
@@ -261,8 +301,6 @@ Resources:
       PayloadFormatVersion: "1.0"
       RequestParameters:
         "overwrite:path": "$request.path"
-        "overwrite:header.x-user-id": "$context.authorizer.claims.sub"
-        "overwrite:header.x-user-email": "$context.authorizer.claims.email"
         "overwrite:header.x-request-id": "$context.requestId"
 
   DeliveryBaseRoute:
@@ -271,9 +309,7 @@ Resources:
       ApiId:
         Fn::ImportValue: food-delivery-http-api-id
       RouteKey: !Sub "ANY ${DeliveryServiceBasePath}"
-      AuthorizationType: JWT
-      AuthorizerId:
-        Fn::ImportValue: food-delivery-jwt-authorizer-id
+      AuthorizationType: NONE
       Target: !Join ["/", ["integrations", !Ref PrivateAlbIntegration]]
 
   DeliveryProxyRoute:
@@ -282,9 +318,7 @@ Resources:
       ApiId:
         Fn::ImportValue: food-delivery-http-api-id
       RouteKey: !Sub "ANY ${DeliveryServiceBasePath}/{proxy+}"
-      AuthorizationType: JWT
-      AuthorizerId:
-        Fn::ImportValue: food-delivery-jwt-authorizer-id
+      AuthorizationType: NONE
       Target: !Join ["/", ["integrations", !Ref PrivateAlbIntegration]]
 
   RestaurantBaseRoute:
@@ -293,9 +327,7 @@ Resources:
       ApiId:
         Fn::ImportValue: food-delivery-http-api-id
       RouteKey: !Sub "ANY ${RestaurantServiceBasePath}"
-      AuthorizationType: JWT
-      AuthorizerId:
-        Fn::ImportValue: food-delivery-jwt-authorizer-id
+      AuthorizationType: NONE
       Target: !Join ["/", ["integrations", !Ref PrivateAlbIntegration]]
 
   RestaurantProxyRoute:
@@ -304,9 +336,43 @@ Resources:
       ApiId:
         Fn::ImportValue: food-delivery-http-api-id
       RouteKey: !Sub "ANY ${RestaurantServiceBasePath}/{proxy+}"
-      AuthorizationType: JWT
-      AuthorizerId:
-        Fn::ImportValue: food-delivery-jwt-authorizer-id
+      AuthorizationType: NONE
+      Target: !Join ["/", ["integrations", !Ref PrivateAlbIntegration]]
+
+  RestaurantCategoryBaseRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Fn::ImportValue: food-delivery-http-api-id
+      RouteKey: !Sub "ANY ${RestaurantCategoryBasePath}"
+      AuthorizationType: NONE
+      Target: !Join ["/", ["integrations", !Ref PrivateAlbIntegration]]
+
+  RestaurantCategoryProxyRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Fn::ImportValue: food-delivery-http-api-id
+      RouteKey: !Sub "ANY ${RestaurantCategoryBasePath}/{proxy+}"
+      AuthorizationType: NONE
+      Target: !Join ["/", ["integrations", !Ref PrivateAlbIntegration]]
+
+  RestaurantMenuItemBaseRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Fn::ImportValue: food-delivery-http-api-id
+      RouteKey: !Sub "ANY ${RestaurantMenuItemBasePath}"
+      AuthorizationType: NONE
+      Target: !Join ["/", ["integrations", !Ref PrivateAlbIntegration]]
+
+  RestaurantMenuItemProxyRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Fn::ImportValue: food-delivery-http-api-id
+      RouteKey: !Sub "ANY ${RestaurantMenuItemBasePath}/{proxy+}"
+      AuthorizationType: NONE
       Target: !Join ["/", ["integrations", !Ref PrivateAlbIntegration]]
 
   PreviewCleanupSchedule:
