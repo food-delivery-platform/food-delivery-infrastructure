@@ -479,6 +479,9 @@ Resources:
         - CapacityProvider: FARGATE
           Weight: 1
       DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
         MaximumPercent: 200
         MinimumHealthyPercent: 0
       HealthCheckGracePeriodSeconds: 60
