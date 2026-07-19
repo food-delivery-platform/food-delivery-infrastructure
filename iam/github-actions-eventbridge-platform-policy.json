@@ -35,6 +35,7 @@
         "ec2:DeleteTags",
         "apigateway:*",
         "cognito-idp:*",
+        "ecr:DescribeImages",
         "ecs:CreateCluster",
         "ecs:CreateService",
         "ecs:DeleteCluster",

@@ -234,6 +234,59 @@ jobs:
           echo "schedule-expression=at(${DELETE_AT})" >> "$GITHUB_OUTPUT"
           echo "delete-at=${DELETE_AT} UTC" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve restaurant-service image
+        id: restaurant-image
+        env:
+          RESTAURANT_SERVICE_IMAGE_URI: ${{ secrets.RESTAURANT_SERVICE_IMAGE_URI }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$RESTAURANT_SERVICE_IMAGE_URI" ]]; then
+            echo "image-uri=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$RESTAURANT_SERVICE_IMAGE_URI" == *@sha256:* ]]; then
+            echo "image-uri=$RESTAURANT_SERVICE_IMAGE_URI" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          registry="${RESTAURANT_SERVICE_IMAGE_URI%%/*}"
+          repository_and_tag="${RESTAURANT_SERVICE_IMAGE_URI#*/}"
+          repository="$repository_and_tag"
+          tag=""
+
+          if [[ "$repository_and_tag" == *:* ]]; then
+            repository="${repository_and_tag%:*}"
+            tag="${repository_and_tag##*:}"
+          fi
+
+          if [[ -z "$repository" || "$repository" == "$registry" ]]; then
+            echo "::error::RESTAURANT_SERVICE_IMAGE_URI must include an ECR repository path"
+            exit 1
+          fi
+
+          if [[ -n "$tag" && "$tag" != "latest" ]]; then
+            echo "image-uri=$RESTAURANT_SERVICE_IMAGE_URI" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          registry_id="${registry%%.dkr.ecr.*}"
+          image_digest=$(aws ecr describe-images \
+            --registry-id "$registry_id" \
+            --repository-name "$repository" \
+            --region "$AWS_REGION" \
+            --query 'sort_by(imageDetails[?imagePushedAt!=`null`], &imagePushedAt)[-1].imageDigest' \
+            --output text)
+
+          if [[ -z "$image_digest" || "$image_digest" == "None" ]]; then
+            echo "::error::No images found in ECR repository $repository"
+            exit 1
+          fi
+
+          echo "image-uri=${registry}/${repository}@${image_digest}" >> "$GITHUB_OUTPUT"
+          echo "Resolved restaurant-service image from latest ECR push time."
+
       - name: Deploy temporary platform and EventBridge schedule
         run: |
           set -euo pipefail
@@ -251,12 +304,12 @@ jobs:
               RestaurantServiceHealthCheckPath="${{ inputs.restaurant_health_check_path }}" \
               DeliveryServiceBasePath="${{ inputs.delivery_base_path }}" \
               RestaurantServiceBasePath="${{ inputs.restaurant_base_path }}" \
-              RestaurantServiceImageUri="${{ secrets.RESTAURANT_SERVICE_IMAGE_URI }}" \
+              RestaurantServiceImageUri="${{ steps.restaurant-image.outputs.image-uri }}" \
               CleanupScheduleExpression="${{ steps.lifetime.outputs.schedule-expression }}"
 
       - name: Show deployment summary
         env:
-          RESTAURANT_SERVICE_IMAGE_URI: ${{ secrets.RESTAURANT_SERVICE_IMAGE_URI }}
+          RESTAURANT_SERVICE_IMAGE_URI: ${{ steps.restaurant-image.outputs.image-uri }}
         run: |
           set -euo pipefail
 

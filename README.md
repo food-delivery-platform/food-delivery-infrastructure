@@ -72,15 +72,26 @@ delivery-service-runtime
 ## Restaurant service image
 
 To run restaurant-service as part of the platform deployment, set the GitHub
-secret `RESTAURANT_SERVICE_IMAGE_URI` to the full image URI:
+secret `RESTAURANT_SERVICE_IMAGE_URI` to the ECR repository URI:
 
 ```text
-123456789012.dkr.ecr.us-east-1.amazonaws.com/restaurant-service:latest
+123456789012.dkr.ecr.us-east-1.amazonaws.com/delivery-service/restaraunt-service
 ```
 
-Use the image URI, not the ECR repository ARN. The repository ARN identifies the
-repository, but ECS task definitions need a pullable image reference including a
-tag or digest.
+When the secret has no tag, or uses `:latest`, the deployment workflow resolves
+the newest image in that ECR repository by push time and passes ECS an immutable
+digest reference.
+
+You can also pin an exact tag or digest:
+
+```text
+123456789012.dkr.ecr.us-east-1.amazonaws.com/delivery-service/restaraunt-service:a656d39eaab3d1d797f8c825737c3717e167c2ae
+123456789012.dkr.ecr.us-east-1.amazonaws.com/delivery-service/restaraunt-service@sha256:...
+```
+
+Use the repository URI or image URI, not the ECR repository ARN. The repository
+ARN identifies the repository for IAM, but ECS task definitions need a pullable
+image reference.
 
 The platform still exports these values if restaurant-service is deployed by a
 separate runtime stack:
