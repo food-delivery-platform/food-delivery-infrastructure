@@ -12,15 +12,20 @@ stack is temporary.
 - EventBridge bus: `food-delivery-orders`
 - PayPal webhook path: `/api/payments/paypal/webhook`
 - Payment state machine: `payment-confirmation-sm`
+- Step Functions role: `sfn-order-service-role`
+- Lambda role: `lambda-order-service-role`
 
 ## Deployment Order
 
 1. Deploy this stack first with `EnablePaypalWebhookRoute=false`.
 
    This creates the permanent EventBridge bus, the payment Step Functions state
-   machine, and inline policies for the existing order-service IAM roles. It does
+   machine, order-service IAM roles, and inline policies for those roles. It does
    not create the API Gateway integration, route, or Lambda permission, so it can
    run before the `paypal_webhook` Lambda exists.
+
+   If `sfn-order-service-role` and `lambda-order-service-role` are already
+   managed by another stack, deploy with `CreateOrderServiceIamRoles=false`.
 
 2. Deploy `order-service`.
 

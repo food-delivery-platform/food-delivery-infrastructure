@@ -14,6 +14,13 @@ Parameters:
     Type: String
     Default: lambda-order-service-role
 
+  CreateOrderServiceIamRoles:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+
   PaymentStateMachineName:
     Type: String
     Default: payment-confirmation-sm
@@ -35,6 +42,7 @@ Parameters:
 
 Conditions:
   CreatePaypalWebhookRoute: !Equals [!Ref EnablePaypalWebhookRoute, "true"]
+  CreateOrderServiceRoles: !Equals [!Ref CreateOrderServiceIamRoles, "true"]
 
 Resources:
   OrderEventsBus:
@@ -49,12 +57,61 @@ Resources:
         - Key: Lifetime
           Value: permanent
 
+  StepFunctionsOrderServiceRole:
+    Type: AWS::IAM::Role
+    Condition: CreateOrderServiceRoles
+    Properties:
+      RoleName: !Ref StepFunctionsRoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Tags:
+        - Key: Project
+          Value: food-delivery
+        - Key: Service
+          Value: order-service
+        - Key: Lifetime
+          Value: permanent
+
+  LambdaOrderServiceRole:
+    Type: AWS::IAM::Role
+    Condition: CreateOrderServiceRoles
+    Properties:
+      RoleName: !Ref LambdaRoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Project
+          Value: food-delivery
+        - Key: Service
+          Value: order-service
+        - Key: Lifetime
+          Value: permanent
+
   StepFunctionsInvokePaymentLambdasPolicy:
     Type: AWS::IAM::Policy
     Properties:
       PolicyName: order-service-payment-lambda-invoke
       Roles:
-        - !Ref StepFunctionsRoleName
+        - !If
+          - CreateOrderServiceRoles
+          - !Ref StepFunctionsOrderServiceRole
+          - !Ref StepFunctionsRoleName
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -73,7 +130,10 @@ Resources:
     Properties:
       StateMachineName: !Ref PaymentStateMachineName
       StateMachineType: STANDARD
-      RoleArn: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StepFunctionsRoleName}
+      RoleArn: !If
+        - CreateOrderServiceRoles
+        - !GetAtt StepFunctionsOrderServiceRole.Arn
+        - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StepFunctionsRoleName}
       DefinitionString: !Sub
         - |
           {
@@ -127,7 +187,10 @@ Resources:
     Properties:
       PolicyName: order-service-payments
       Roles:
-        - !Ref LambdaRoleName
+        - !If
+          - CreateOrderServiceRoles
+          - !Ref LambdaOrderServiceRole
+          - !Ref LambdaRoleName
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -181,6 +244,10 @@ Outputs:
     Value: !Ref PaymentStateMachineName
   PaymentStateMachineArn:
     Value: !Ref PaymentStateMachine
+  StepFunctionsRoleName:
+    Value: !Ref StepFunctionsRoleName
+  LambdaRoleName:
+    Value: !Ref LambdaRoleName
   PaypalWebhookPath:
     Value: !Ref PaypalWebhookPath
   PaypalWebhookUrl:
