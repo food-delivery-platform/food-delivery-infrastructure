@@ -8,6 +8,11 @@ on:
         required: true
         default: false
         type: boolean
+      create_iam_roles:
+        description: Create sfn-order-service-role and lambda-order-service-role in this stack
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -69,7 +74,8 @@ jobs:
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
             --parameter-overrides \
-              EnablePaypalWebhookRoute="${{ inputs.enable_webhook_route }}"
+              EnablePaypalWebhookRoute="${{ inputs.enable_webhook_route }}" \
+              CreateOrderServiceIamRoles="${{ inputs.create_iam_roles }}"
 
       - name: Show CloudFormation outputs
         run: |

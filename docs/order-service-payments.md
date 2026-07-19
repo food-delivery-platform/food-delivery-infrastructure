@@ -44,6 +44,7 @@ stack is temporary.
 Use the `Deploy order-service payments` workflow:
 
 1. Run it with `enable_webhook_route` disabled for the first deployment.
+   Leave `create_iam_roles` enabled unless those roles are managed elsewhere.
 2. Deploy `order-service`.
 3. Run it again with `enable_webhook_route` enabled.
 
