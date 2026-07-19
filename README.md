@@ -93,6 +93,18 @@ Use the repository URI or image URI, not the ECR repository ARN. The repository
 ARN identifies the repository for IAM, but ECS task definitions need a pullable
 image reference.
 
+For restaurant API routes that read the database, also set
+`SECRET_ARN` to the ARN of a Secrets Manager secret whose JSON contains:
+
+```json
+{
+  "RESTAURANT_DB_URL": "postgresql://user:password@host:5432/database"
+}
+```
+
+The platform passes that ARN to the container as `AWS_DB_SECRET_ARN` and gives
+the ECS task role `secretsmanager:GetSecretValue` for that secret.
+
 The platform still exports these values if restaurant-service is deployed by a
 separate runtime stack:
 

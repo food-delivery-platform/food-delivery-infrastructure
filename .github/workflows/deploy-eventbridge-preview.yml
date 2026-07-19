@@ -94,6 +94,7 @@ jobs:
           DELIVERY_BASE_PATH: ${{ inputs.delivery_base_path }}
           RESTAURANT_BASE_PATH: ${{ inputs.restaurant_base_path }}
           RESTAURANT_SERVICE_IMAGE_URI: ${{ secrets.RESTAURANT_SERVICE_IMAGE_URI }}
+          SECRET_ARN: ${{ secrets.SECRET_ARN }}
         run: |
           set -euo pipefail
 
@@ -141,6 +142,11 @@ jobs:
               echo "::error::RESTAURANT_SERVICE_IMAGE_URI must look like an ECR image URI"
               exit 1
             fi
+          fi
+
+          if [[ -n "$SECRET_ARN" && "$SECRET_ARN" != arn:aws:secretsmanager:* ]]; then
+            echo "::error::SECRET_ARN must be a Secrets Manager secret ARN"
+            exit 1
           fi
 
       - name: Validate CloudFormation templates
@@ -305,6 +311,7 @@ jobs:
               DeliveryServiceBasePath="${{ inputs.delivery_base_path }}" \
               RestaurantServiceBasePath="${{ inputs.restaurant_base_path }}" \
               RestaurantServiceImageUri="${{ steps.restaurant-image.outputs.image-uri }}" \
+              RestaurantDatabaseSecretArn="${{ secrets.SECRET_ARN }}" \
               CleanupScheduleExpression="${{ steps.lifetime.outputs.schedule-expression }}"
 
       - name: Show deployment summary

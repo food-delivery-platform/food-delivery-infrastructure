@@ -57,12 +57,22 @@ Parameters:
     MinValue: 0
     MaxValue: 10
 
+  RestaurantDatabaseSecretArn:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: ARN of the Secrets Manager secret containing RESTAURANT_DB_URL for restaurant-service.
+
   CleanupScheduleExpression:
     Type: String
     Description: One-time expression such as at(2026-07-15T18:30:00).
 
 Conditions:
   CreateRestaurantService: !Not [!Equals [!Ref RestaurantServiceImageUri, ""]]
+  HasRestaurantDatabaseSecret: !Not [!Equals [!Ref RestaurantDatabaseSecretArn, ""]]
+  CreateRestaurantServiceWithDatabaseSecret: !And
+    - !Condition CreateRestaurantService
+    - !Condition HasRestaurantDatabaseSecret
 
 Resources:
   PreviewCluster:
@@ -195,6 +205,40 @@ Resources:
         - Key: Lifetime
           Value: temporary
 
+  RestaurantTaskRole:
+    Type: AWS::IAM::Role
+    Condition: CreateRestaurantService
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Tags:
+        - Key: Service
+          Value: restaurant-service
+        - Key: Lifetime
+          Value: temporary
+
+  RestaurantDatabaseSecretReadPolicy:
+    Type: AWS::IAM::Policy
+    Condition: CreateRestaurantServiceWithDatabaseSecret
+    Properties:
+      PolicyName: ReadRestaurantDatabaseSecret
+      Roles:
+        - !Ref RestaurantTaskRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: !Ref RestaurantDatabaseSecretArn
+
   RestaurantTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Condition: CreateRestaurantService
@@ -206,6 +250,7 @@ Resources:
       RequiresCompatibilities:
         - FARGATE
       ExecutionRoleArn: !GetAtt RestaurantTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt RestaurantTaskRole.Arn
       ContainerDefinitions:
         - Name: restaurant-service
           Image: !Ref RestaurantServiceImageUri
@@ -216,6 +261,13 @@ Resources:
           Environment:
             - Name: PORT
               Value: !Ref RestaurantServiceContainerPort
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - !If
+              - HasRestaurantDatabaseSecret
+              - Name: AWS_DB_SECRET_ARN
+                Value: !Ref RestaurantDatabaseSecretArn
+              - !Ref AWS::NoValue
           LogConfiguration:
             LogDriver: awslogs
             Options:
