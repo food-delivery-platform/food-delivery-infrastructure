@@ -66,6 +66,62 @@ Resources:
               - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:mark_payment_result
               - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:publish_order_event
 
+  PaymentStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn:
+      - StepFunctionsInvokePaymentLambdasPolicy
+    Properties:
+      StateMachineName: !Ref PaymentStateMachineName
+      StateMachineType: STANDARD
+      RoleArn: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${StepFunctionsRoleName}
+      DefinitionString: !Sub
+        - |
+          {
+            "Comment": "Confirm order payment and publish the resulting order event.",
+            "StartAt": "VerifyPayment",
+            "States": {
+              "VerifyPayment": {
+                "Type": "Task",
+                "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${VerifyPaymentFunctionArn}",
+                  "Payload.$": "$"
+                },
+                "ResultPath": "$.verifyPayment",
+                "Next": "MarkPaymentResult"
+              },
+              "MarkPaymentResult": {
+                "Type": "Task",
+                "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${MarkPaymentResultFunctionArn}",
+                  "Payload.$": "$"
+                },
+                "ResultPath": "$.markPaymentResult",
+                "Next": "PublishOrderEvent"
+              },
+              "PublishOrderEvent": {
+                "Type": "Task",
+                "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                "Parameters": {
+                  "FunctionName": "${PublishOrderEventFunctionArn}",
+                  "Payload.$": "$"
+                },
+                "End": true
+              }
+            }
+          }
+        - VerifyPaymentFunctionArn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:verify_payment
+          MarkPaymentResultFunctionArn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:mark_payment_result
+          PublishOrderEventFunctionArn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:publish_order_event
+      Tags:
+        - Key: Project
+          Value: food-delivery
+        - Key: Service
+          Value: order-service
+        - Key: Lifetime
+          Value: permanent
+
   LambdaOrderServicePaymentsPolicy:
     Type: AWS::IAM::Policy
     Properties:
@@ -121,3 +177,15 @@ Outputs:
     Value: !Ref OrderEventsBus
   EventBusArn:
     Value: !GetAtt OrderEventsBus.Arn
+  PaymentStateMachineName:
+    Value: !Ref PaymentStateMachineName
+  PaymentStateMachineArn:
+    Value: !Ref PaymentStateMachine
+  PaypalWebhookPath:
+    Value: !Ref PaypalWebhookPath
+  PaypalWebhookUrl:
+    Condition: CreatePaypalWebhookRoute
+    Value: !Sub
+      - ${HttpApiEndpoint}${PaypalWebhookPath}
+      - HttpApiEndpoint:
+          Fn::ImportValue: food-delivery-http-api-endpoint

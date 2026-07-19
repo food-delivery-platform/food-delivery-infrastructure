@@ -86,6 +86,21 @@
       "Resource": "*"
     },
     {
+      "Sid": "OrderServicePaymentEvents",
+      "Effect": "Allow",
+      "Action": [
+        "events:CreateEventBus",
+        "events:DeleteEventBus",
+        "events:DescribeEventBus",
+        "events:ListTagsForResource",
+        "events:TagResource",
+        "events:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:events:us-east-1:882557516724:event-bus/food-delivery-orders"
+      ]
+    },
+    {
       "Sid": "CleanupIamRoles",
       "Effect": "Allow",
       "Action": [
