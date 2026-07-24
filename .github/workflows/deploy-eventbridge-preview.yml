@@ -18,7 +18,7 @@ on:
       delivery_container_port:
         description: Port exposed by delivery-service
         required: true
-        default: "8080"
+        default: "8000"
         type: string
 
       restaurant_container_port:
@@ -42,7 +42,7 @@ on:
       delivery_base_path:
         description: API base path for delivery-service, without trailing slash
         required: true
-        default: "/api/deliveries"
+        default: "/api/v1"
         type: string
 
       restaurant_base_path:

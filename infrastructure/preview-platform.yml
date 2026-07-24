@@ -8,7 +8,7 @@ Description: >-
 Parameters:
   DeliveryServiceContainerPort:
     Type: Number
-    Default: 8080
+    Default: 8000
     MinValue: 1
     MaxValue: 65535
 
@@ -28,7 +28,7 @@ Parameters:
 
   DeliveryServiceBasePath:
     Type: String
-    Default: "/api/deliveries"
+    Default: "/api/v1"
     Description: API base path without a trailing slash.
 
   RestaurantServiceBasePath:
